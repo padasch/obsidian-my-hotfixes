@@ -43,6 +43,66 @@ const BASE_VIEW_SWITCHER_SELECTOR = ".obsidian-hotfixes-base-view-switcher";
 
 const DEFAULT_CELL_HEIGHT_PX = 34;
 
+const INTERACTIVE_ANCESTOR_SELECTORS = [
+  "a[href]",
+  "button",
+  "input",
+  "select",
+  "textarea",
+  "label",
+  "summary",
+  "[role='button']",
+  "[role='checkbox']",
+  ".task-list-item-checkbox",
+  ".checkbox-container",
+];
+
+const CALLOUT_HEADER_SELECTORS = [
+  ".callout-title",
+  ".callout-title-inner",
+  ".callout-icon",
+  "[data-callout-icon]",
+  "[data-icon='caret-right']",
+  "[data-icon='chevron-right']",
+];
+
+const TASKS_EMOJI_ACTION_SELECTORS = [
+  ".task-list-item",
+  ".task-list-item-checkbox",
+  "[data-task-id]",
+  "[data-task-action]",
+  "[data-action^='task']",
+  "[data-action^='tasks']",
+  ".tasks-edit",
+  ".tasks-postpone",
+  ".task-due",
+  ".task-scheduled",
+  ".task-start",
+  ".task-created",
+  ".task-done",
+  ".task-cancelled",
+  ".task-priority",
+  ".task-recurring",
+  ".task-id",
+  ".task-block",
+  "[class*='tasks-']",
+  "[class*='task-']",
+  "[role='button'][aria-label*='due']",
+  "[role='button'][aria-label*='schedule']",
+  "[role='button'][title*='due']",
+  "[role='button'][title*='schedule']",
+  "button[data-action][aria-label*='task']",
+];
+
+const CALLOUT_EDIT_BUTTON_SELECTORS = [
+  ".edit-block-button",
+  "button[data-action='edit-block']",
+  "button[data-action='open-source']",
+  "[data-tooltip='Edit']",
+  "[aria-label='Edit block']",
+  "[aria-label='Edit']",
+];
+
 type FrozenTableWrapMode = "narrow" | "wide";
 type FrozenTableSortDirection = "ASC" | "DESC";
 
@@ -180,9 +240,14 @@ interface BaseViewSwitcherHotfixSettings {
   showInEmbeds: boolean;
 }
 
+interface CalloutEditGuardHotfixSettings {
+  enabled: boolean;
+}
+
 interface HotfixSettings {
   freezeFirstColumn: FreezeFirstColumnHotfixSettings;
   baseViewSwitcher: BaseViewSwitcherHotfixSettings;
+  calloutEditGuard: CalloutEditGuardHotfixSettings;
 }
 
 const DEFAULT_SETTINGS: HotfixSettings = {
@@ -198,6 +263,9 @@ const DEFAULT_SETTINGS: HotfixSettings = {
     enabled: false,
     showInBaseFiles: true,
     showInEmbeds: true,
+  },
+  calloutEditGuard: {
+    enabled: true,
   },
 };
 
@@ -226,6 +294,7 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   settings: HotfixSettings = {
     freezeFirstColumn: { ...DEFAULT_SETTINGS.freezeFirstColumn },
     baseViewSwitcher: { ...DEFAULT_SETTINGS.baseViewSwitcher },
+    calloutEditGuard: { ...DEFAULT_SETTINGS.calloutEditGuard },
   };
   private styleElement: HTMLStyleElement | null = null;
   private baseViewSwitcherObserver: MutationObserver | null = null;
@@ -236,6 +305,7 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     await this.loadSettings();
     this.applyStyles();
     this.registerSettingTab();
+    this.registerCalloutEditGuard();
     const registered = this.registerBasesView(FROZEN_TABLE_VIEW_TYPE, {
       name: "Frozen Table",
       icon: "lucide-layout-grid",
@@ -360,6 +430,10 @@ export default class ObsidianHotfixesPlugin extends Plugin {
         ...DEFAULT_SETTINGS.baseViewSwitcher,
         ...(loaded?.baseViewSwitcher ?? {}),
       },
+      calloutEditGuard: {
+        ...DEFAULT_SETTINGS.calloutEditGuard,
+        ...(loaded?.calloutEditGuard ?? {}),
+      },
     };
   }
 
@@ -389,6 +463,8 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   --obsidian-hotfixes-first-column-min-width: ${minWidth}px;
   --obsidian-hotfixes-first-column-max-width: ${maxWidth}px;
   --obsidian-hotfixes-cell-height: ${DEFAULT_CELL_HEIGHT_PX}px;
+  --obsidian-hotfixes-cell-padding-y: 8px;
+  --obsidian-hotfixes-cell-padding-x: 10px;
   --obsidian-hotfixes-first-column-bg: ${config.backgroundColor};
   --obsidian-hotfixes-first-column-z: ${config.zIndex};
 }
@@ -421,10 +497,11 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th,
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table td {
-  padding: 8px 10px;
+  padding: var(--obsidian-hotfixes-cell-padding-y) var(--obsidian-hotfixes-cell-padding-x);
   border-bottom: 1px solid var(--background-modifier-border);
   border-right: 1px solid var(--background-modifier-border);
   vertical-align: top;
+  line-height: 1.2;
   box-sizing: border-box;
   min-height: var(--obsidian-hotfixes-cell-height);
 }
@@ -647,6 +724,138 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       ...updates,
     };
     await this.saveSettings();
+  }
+
+  async updateCalloutEditGuard(
+    updates: Partial<CalloutEditGuardHotfixSettings>
+  ) {
+    this.settings.calloutEditGuard = {
+      ...this.settings.calloutEditGuard,
+      ...updates,
+    };
+    await this.saveSettings();
+  }
+
+  private registerCalloutEditGuard() {
+    this.registerDomEvent(
+      document,
+      "pointerdown",
+      this.onCalloutEditGuardEventCapture,
+      true
+    );
+    this.registerDomEvent(
+      document,
+      "mousedown",
+      this.onCalloutEditGuardEventCapture,
+      true
+    );
+    this.registerDomEvent(
+      document,
+      "click",
+      this.onCalloutEditGuardEventCapture,
+      true
+    );
+  }
+
+  private readonly onCalloutEditGuardEventCapture = (
+    event: PointerEvent | MouseEvent
+  ): void => {
+    if (!this.settings.calloutEditGuard.enabled) {
+      return;
+    }
+
+    if (!(event.target instanceof HTMLElement)) {
+      return;
+    }
+
+    if (("button" in event && event.button !== 0) || event.type === "contextmenu") {
+      return;
+    }
+
+    const sourceViewRoot = event.target.closest(".markdown-source-view.mod-cm6");
+    if (!sourceViewRoot || !event.target.closest(".callout")) {
+      return;
+    }
+
+    if (this.isCalloutHeaderLine(event.target)) {
+      return;
+    }
+
+    if (
+      this.isInsideInteractiveElement(event.target) ||
+      this.isTasksEmojiAction(event.target) ||
+      this.isCalloutEditButton(event.target)
+    ) {
+      return;
+    }
+
+    event.stopImmediatePropagation();
+  };
+
+  private isInsideInteractiveElement(target: HTMLElement): boolean {
+    return INTERACTIVE_ANCESTOR_SELECTORS.some(
+      (selector) => target.closest(selector) !== null
+    );
+  }
+
+  private isCalloutHeaderLine(target: HTMLElement): boolean {
+    return CALLOUT_HEADER_SELECTORS.some(
+      (selector) => target.closest(selector) !== null
+    );
+  }
+
+  private isTasksEmojiAction(target: HTMLElement): boolean {
+    const taskActionContext = target.closest(
+      ".tasks-edit, .tasks-postpone, .task-list-item, .task-list-item-checkbox, [data-task-id], [data-task-action], [data-action^='task'], [data-action^='tasks']"
+    );
+    if (taskActionContext) {
+      return true;
+    }
+
+    if (
+      TASKS_EMOJI_ACTION_SELECTORS.some(
+        (selector) => target.closest(selector) !== null
+      )
+    ) {
+      return true;
+    }
+
+    const actionLike = target.closest("button, [role='button'], [tabindex], a");
+    if (!actionLike) {
+      return false;
+    }
+
+    const actionContainer = actionLike.closest(
+      "[data-task-id], [data-task-action], [data-action^='task'], [data-action^='tasks'], [class*='tasks-'], [class*='task-']"
+    );
+    if (!actionContainer) {
+      return false;
+    }
+
+    const hint = [
+      actionLike.getAttribute("aria-label") ?? "",
+      actionLike.getAttribute("title") ?? "",
+      actionLike.textContent ?? "",
+    ].join(" ").toLowerCase();
+    return /task|calendar|due|schedule|recurr|memo|repeat|postpone|start date|due date|done|priority|cancel/.test(hint);
+  }
+
+  private isCalloutEditButton(target: HTMLElement): boolean {
+    if (
+      CALLOUT_EDIT_BUTTON_SELECTORS.some(
+        (selector) => target.closest(selector) !== null
+      )
+    ) {
+      return true;
+    }
+
+    const buttonLike = target.closest("button, [role='button']");
+    if (!buttonLike) {
+      return false;
+    }
+
+    const ariaLabel = buttonLike.getAttribute("aria-label")?.toLowerCase() ?? "";
+    return ariaLabel.includes("edit");
   }
 
   private configureBaseViewSwitcher() {
@@ -1481,11 +1690,20 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
       1,
       Math.min(100, Math.round(features.cellHeightPx))
     );
+    const verticalPadding = this.getCompactCellPadding(cellHeight);
     const sortState = features.enableSorting ? this.getSortState() : null;
     this.root.className = `obsidian-hotfixes-frozen-bases-root obsidian-hotfixes-wrap-${features.wrapMode}`;
     this.root.style.setProperty(
       "--obsidian-hotfixes-cell-height",
       `${cellHeight}px`
+    );
+    this.root.style.setProperty(
+      "--obsidian-hotfixes-cell-padding-y",
+      `${verticalPadding}px`
+    );
+    this.root.style.setProperty(
+      "--obsidian-hotfixes-cell-padding-x",
+      `${Math.min(10, 4 + Math.ceil(verticalPadding * 1.25))}px`
     );
 
     this.currentPropertyOrder = [];
@@ -1964,6 +2182,22 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
     const configured = this.activeColumnWidths.get(propertyId);
     const width = typeof configured === "number" ? configured : fallbackDefault;
     return this.clampColumnWidth(width, index === 0);
+  }
+
+  private getCompactCellPadding(cellHeightPx: number): number {
+    if (cellHeightPx <= 8) {
+      return 0;
+    }
+    if (cellHeightPx <= 12) {
+      return 1;
+    }
+    if (cellHeightPx <= 20) {
+      return 2;
+    }
+    if (cellHeightPx <= 30) {
+      return 3;
+    }
+    return 4;
   }
 
   private clampColumnWidth(width: number, isFirstColumn = false): number {
@@ -2542,5 +2776,28 @@ class HotfixesSettingTab extends PluginSettingTab {
       });
 
     this.setBaseViewSwitcherSectionEnabled(switcherState.enabled);
+
+    const calloutDetails = containerEl.createEl("details", {
+      cls: "obsidian-hotfixes-setting-section",
+    });
+    calloutDetails.createEl("summary", {
+      text: "Callouts: Edit guard",
+    });
+    const calloutSection = calloutDetails.createEl("div", {
+      cls: "obsidian-hotfixes-setting-section-content",
+    });
+    const calloutState = this.plugin.settings.calloutEditGuard;
+
+    new Setting(calloutSection)
+      .setName("Enable callout edit guard")
+      .setDesc(
+        "In Live Preview, clicking inside a rendered callout will no longer switch it into edit/source mode. Use the callout edit button to open editing."
+      )
+      .addToggle((toggle) => {
+        toggle.setValue(calloutState.enabled);
+        toggle.onChange(async (value) => {
+          await this.plugin.updateCalloutEditGuard({ enabled: value });
+        });
+      });
   }
 }

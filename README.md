@@ -7,6 +7,11 @@ Personal utility plugin for small Obsidian quality-of-life fixes.
 - **Hotfix section: Bases frozen first column**
   - Adds a custom Bases view named **Frozen Table** with a sticky first column (so horizontal scrolling keeps the first column fixed).
   - Optional fine-tuning for selector, background, offset, z-index, and divider.
+- **Hotfix section: Bases quick view switcher**
+  - Adds compact buttons above Base files and embedded Bases for switching between views.
+- **Hotfix section: Callout edit guard**
+  - In Live Preview, prevents accidental callout edit/source activation when clicking in a rendered callout body.
+  - Keeps links, checkboxes, task controls, callout folding, and the callout edit button interactive.
 
 ## Settings
 
@@ -16,12 +21,14 @@ All settings are in the plugin settings panel and are arranged as foldable secti
 - **Background**: background for the sticky first column.
 - **First-column width** settings: min/max width and z-index.
 - **Show divider**: adds a divider between the first and second columns.
+- **Enable view switcher row**: master switch for the compact Base view switcher.
+- **Enable callout edit guard**: master switch for the callout click guard.
 
 ## Usage
 
-1. Open any Base with `table` data and click the view selector in the toolbar.
-2. Switch to **Frozen Table**.
-3. Enable the hotfix in plugin settings if it is not already on.
+1. Enable the hotfix sections you want in plugin settings.
+2. For sticky Bases, open any Base with `table` data and switch to **Frozen Table**.
+3. For callouts, use Live Preview normally. Body clicks stay in preview; use Obsidian's callout edit button when you want to edit the callout block.
 
 ## BRAT setup
 
