@@ -37,11 +37,19 @@ const FROZEN_TABLE_EDIT_FEATURE_KEY = "obsidian-hotfixes:view-feature-edit-notes
 const FROZEN_TABLE_WRAP_MODE_FEATURE_KEY = "obsidian-hotfixes:view-feature-wrap-mode";
 const FROZEN_TABLE_TRUNCATE_FEATURE_KEY = "obsidian-hotfixes:view-feature-truncate";
 const FROZEN_TABLE_CELL_HEIGHT_FEATURE_KEY = "obsidian-hotfixes:view-feature-cell-height";
+const FROZEN_TABLE_SORT_FEATURE_KEY = "obsidian-hotfixes:view-feature-sort";
+const FROZEN_TABLE_SORT_STATE_KEY = "obsidian-hotfixes:view-state-sort";
 const BASE_VIEW_SWITCHER_SELECTOR = ".obsidian-hotfixes-base-view-switcher";
 
 const DEFAULT_CELL_HEIGHT_PX = 34;
 
 type FrozenTableWrapMode = "narrow" | "wide";
+type FrozenTableSortDirection = "ASC" | "DESC";
+
+interface FrozenTableSortState {
+  propertyId: string;
+  direction: FrozenTableSortDirection;
+}
 
 interface FrozenTableViewFeatures {
   enableResize: boolean;
@@ -50,6 +58,7 @@ interface FrozenTableViewFeatures {
   editableNotes: boolean;
   wrapMode: FrozenTableWrapMode;
   cellHeightPx: number;
+  enableSorting: boolean;
 }
 
 const DEFAULT_FROZEN_TABLE_FEATURES: FrozenTableViewFeatures = {
@@ -59,6 +68,7 @@ const DEFAULT_FROZEN_TABLE_FEATURES: FrozenTableViewFeatures = {
   editableNotes: false,
   wrapMode: "narrow",
   cellHeightPx: DEFAULT_CELL_HEIGHT_PX,
+  enableSorting: true,
 };
 
 function getBooleanFeatureValue(
@@ -147,6 +157,10 @@ function getFrozenTableViewFeatures(
     cellHeightPx: getNumberFeatureValue(
       config.get(FROZEN_TABLE_CELL_HEIGHT_FEATURE_KEY),
       DEFAULT_FROZEN_TABLE_FEATURES.cellHeightPx
+    ),
+    enableSorting: getBooleanFeatureValue(
+      config.get(FROZEN_TABLE_SORT_FEATURE_KEY),
+      DEFAULT_FROZEN_TABLE_FEATURES.enableSorting
     ),
   };
 }
@@ -245,6 +259,12 @@ export default class ObsidianHotfixesPlugin extends Plugin {
                 key: FROZEN_TABLE_REORDER_FEATURE_KEY,
                 displayName: "Enable column reordering",
                 default: featureSettings.enableReorder,
+              },
+              {
+                type: "toggle",
+                key: FROZEN_TABLE_SORT_FEATURE_KEY,
+                displayName: "Enable column sorting",
+                default: featureSettings.enableSorting,
               },
               {
                 type: "toggle",
@@ -465,6 +485,25 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-frozen-bases-reorder-handle {
   cursor: grab;
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th.obsidian-hotfixes-frozen-bases-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th.obsidian-hotfixes-frozen-bases-sortable:hover {
+  background: var(--background-modifier-hover);
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th.obsidian-hotfixes-frozen-bases-sortable[data-sort-direction]::after {
+  content: attr(data-sort-direction);
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.75em;
+  opacity: 0.75;
 }
 
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th[data-drag-target="true"] {
@@ -1442,6 +1481,7 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
       1,
       Math.min(100, Math.round(features.cellHeightPx))
     );
+    const sortState = features.enableSorting ? this.getSortState() : null;
     this.root.className = `obsidian-hotfixes-frozen-bases-root obsidian-hotfixes-wrap-${features.wrapMode}`;
     this.root.style.setProperty(
       "--obsidian-hotfixes-cell-height",
@@ -1535,6 +1575,27 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
           this.startColumnResize(event, propertyKey, index)
         );
       }
+
+      if (features.enableSorting) {
+        header.addClass("obsidian-hotfixes-frozen-bases-sortable");
+        header.setAttribute("role", "columnheader");
+        if (sortState?.propertyId === propertyKey) {
+          header.setAttribute(
+            "data-sort-direction",
+            sortState.direction === "ASC" ? "↑" : "↓"
+          );
+          header.setAttribute(
+            "aria-sort",
+            sortState.direction === "ASC" ? "ascending" : "descending"
+          );
+        } else {
+          header.removeAttribute("data-sort-direction");
+          header.setAttribute("aria-sort", "none");
+        }
+        header.addEventListener("click", (event) =>
+          this.onHeaderSortClick(event, propertyKey)
+        );
+      }
     });
 
     const tbody = table.createTBody();
@@ -1555,7 +1616,11 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
         groupCell.colSpan = propertyOrder.length;
       }
 
-      for (const entry of entries) {
+      const sortedEntries = sortState
+        ? this.getSortedEntries(entries, sortState)
+        : entries;
+
+      for (const entry of sortedEntries) {
         const row = tbody.createEl("tr", { cls: "obsidian-hotfixes-data-row" });
         for (let index = 0; index < propertyOrder.length; index++) {
           const propertyId = propertyOrder[index];
@@ -2048,6 +2113,205 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
     this.draggingColumn = null;
     this.clearDragTargetStyles();
   };
+
+  private getSortState(): FrozenTableSortState | null {
+    const saved = this.config.get(FROZEN_TABLE_SORT_STATE_KEY);
+    if (
+      !saved ||
+      typeof saved !== "object" ||
+      Array.isArray(saved) ||
+      typeof (saved as { direction?: unknown }).direction !== "string" ||
+      typeof (saved as { propertyId?: unknown }).propertyId !== "string"
+    ) {
+      return null;
+    }
+
+    const direction = (saved as { direction: string }).direction;
+    if (direction !== "ASC" && direction !== "DESC") {
+      return null;
+    }
+
+    const propertyId = (saved as { propertyId: string }).propertyId;
+    return { propertyId, direction };
+  }
+
+  private setSortState(state: FrozenTableSortState | null) {
+    this.config.set(FROZEN_TABLE_SORT_STATE_KEY, state);
+  }
+
+  private onHeaderSortClick(
+    event: MouseEvent,
+    propertyId: string
+  ) {
+    const featureSettings = getFrozenTableViewFeatures(this.config);
+    if (!featureSettings.enableSorting) {
+      return;
+    }
+
+    const target = event.target as HTMLElement | null;
+    if (
+      target &&
+      target.closest(".obsidian-hotfixes-frozen-bases-resize-handle")
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    const sort = this.getSortState();
+    if (!sort || sort.propertyId !== propertyId) {
+      this.setSortState({
+        propertyId,
+        direction: "ASC",
+      });
+      this.render();
+      return;
+    }
+
+    if (sort.direction === "ASC") {
+      this.setSortState({
+        propertyId,
+        direction: "DESC",
+      });
+      this.render();
+      return;
+    }
+
+    this.setSortState(null);
+    this.render();
+  }
+
+  private getSortedEntries(
+    entries: any[],
+    sortState: FrozenTableSortState
+  ): any[] {
+    const sortablePropertyId = sortState.propertyId as BasesPropertyId;
+    return entries
+      .map((entry, index) => ({ entry, index }))
+      .sort((left, right) => {
+        const leftValue = this.normalizeSortValue(
+          this.readCellValue(left.entry, sortablePropertyId)
+        );
+        const rightValue = this.normalizeSortValue(
+          this.readCellValue(right.entry, sortablePropertyId)
+        );
+        const direction = sortState.direction === "ASC" ? 1 : -1;
+
+        const valueComparison = this.compareSortableValues(leftValue, rightValue);
+        if (valueComparison !== 0) {
+          return valueComparison * direction;
+        }
+
+        const fallbackComparison = this.compareSortableValues(
+          this.getSortFallback(left.entry),
+          this.getSortFallback(right.entry)
+        );
+        if (fallbackComparison !== 0) {
+          return fallbackComparison;
+        }
+
+        return left.index - right.index;
+      })
+      .map(({ entry }) => entry);
+  }
+
+  private readCellValue(entry: any, propertyId: BasesPropertyId): unknown {
+    try {
+      return entry.getValue(propertyId);
+    } catch {
+      return null;
+    }
+  }
+
+  private getSortFallback(entry: any): string {
+    const path = entry?.file?.path;
+    const name = entry?.file?.name;
+    if (typeof path === "string" && path.length > 0) {
+      return path;
+    }
+    if (typeof name === "string" && name.length > 0) {
+      return name;
+    }
+    return "";
+  }
+
+  private normalizeSortValue(value: unknown): string | number | null {
+    if (value === null || value === undefined) {
+      return null;
+    }
+
+    if (value instanceof UrlValue) {
+      return value.toString();
+    }
+
+    if (value instanceof LinkValue) {
+      return value.toString();
+    }
+
+    if (value instanceof Date) {
+      return value.getTime();
+    }
+
+    if (typeof value === "number") {
+      return value;
+    }
+
+    if (typeof value === "boolean") {
+      return value ? 1 : 0;
+    }
+
+    if (typeof value === "string") {
+      return value;
+    }
+
+    if (Array.isArray(value)) {
+      return value
+        .map((item) =>
+          typeof item === "string"
+            ? item
+            : typeof item === "number" ? item.toString() : ""
+        )
+        .filter((item): item is string => item.length > 0)
+        .join(", ");
+    }
+
+    if (typeof value === "object") {
+      const candidatePaths = ["text", "path", "name", "value", "toString"];
+      for (const key of candidatePaths) {
+        const candidate = (value as { [key: string]: unknown })[key];
+        if (typeof candidate === "string" && candidate.length > 0) {
+          return candidate;
+        }
+      }
+    }
+
+    return String(value);
+  }
+
+  private compareSortableValues(
+    a: string | number | null,
+    b: string | number | null
+  ): number {
+    if (a === null) {
+      return b === null ? 0 : 1;
+    }
+    if (b === null) {
+      return -1;
+    }
+    if (typeof a === "number" && typeof b === "number") {
+      return a > b ? 1 : a < b ? -1 : 0;
+    }
+
+    const aText = String(a).toLowerCase();
+    const bText = String(b).toLowerCase();
+    if (aText === bText) {
+      return 0;
+    }
+
+    return new Intl.Collator(undefined, {
+      numeric: true,
+      sensitivity: "base",
+    }).compare(aText, bText);
+  }
 
   private getCurrentColumnOrder(): BasesPropertyId[] {
     const explicitOrder = this.config.get(DRAGGABLE_ORDER_CONFIG_KEY);
