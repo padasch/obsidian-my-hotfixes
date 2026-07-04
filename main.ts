@@ -16,6 +16,10 @@ import {
 
 const STYLE_ELEMENT_ID = "obsidian-hotfixes-runtime-styles";
 const FROZEN_TABLE_VIEW_TYPE = "obsidian-hotfixes-frozen-table";
+const DEFAULT_COLUMN_WIDTH_PX = 180;
+const MIN_RESIZABLE_COLUMN_WIDTH_PX = 60;
+const DRAGGABLE_ORDER_CONFIG_KEY = "obsidian-hotfixes:column-order";
+const COLUMN_WIDTHS_CONFIG_KEY = "obsidian-hotfixes:column-widths";
 
 interface FreezeFirstColumnHotfixSettings {
   enabled: boolean;
@@ -88,9 +92,13 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 
   async loadSettings() {
     const loaded = await this.loadData();
-    this.settings.freezeFirstColumn = {
-      ...DEFAULT_SETTINGS.freezeFirstColumn,
-      ...(loaded?.freezeFirstColumn ?? {}),
+    this.settings = {
+      ...DEFAULT_SETTINGS,
+      ...loaded,
+      freezeFirstColumn: {
+        ...DEFAULT_SETTINGS.freezeFirstColumn,
+        ...(loaded?.freezeFirstColumn ?? {}),
+      },
     };
   }
 
@@ -135,8 +143,9 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   border-collapse: separate;
   border-spacing: 0;
   font-size: var(--font-ui-smaller);
-  table-layout: auto;
+  table-layout: fixed;
   max-width: none;
+  position: relative;
 }
 
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table thead th {
@@ -162,12 +171,43 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table td:first-child {
   position: sticky;
   left: 0;
-  min-width: var(--obsidian-hotfixes-first-column-min-width);
-  width: var(--obsidian-hotfixes-first-column-min-width);
-  max-width: var(--obsidian-hotfixes-first-column-max-width);
+  min-width: var(--obsidian-hotfixes-first-column-width, var(--obsidian-hotfixes-first-column-min-width));
+  width: var(--obsidian-hotfixes-first-column-width, var(--obsidian-hotfixes-first-column-min-width));
+  max-width: var(--obsidian-hotfixes-first-column-width, var(--obsidian-hotfixes-first-column-max-width));
   background: var(--obsidian-hotfixes-first-column-bg);
   z-index: var(--obsidian-hotfixes-first-column-z);
   border-right: ${divider};
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th {
+  position: relative;
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-frozen-bases-resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 10px;
+  cursor: col-resize;
+  user-select: none;
+  z-index: 2;
+  touch-action: none;
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-frozen-bases-resize-handle::after {
+  content: "";
+  display: block;
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: var(--background-modifier-border);
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th[data-drag-target="true"] {
+  outline: 1px solid var(--interactive-accent);
 }
 
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th:first-child {
@@ -238,6 +278,121 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 class FrozenTableBasesView extends BasesView implements HoverParent {
   hoverPopover: HoverPopover | null = null;
   private readonly root: HTMLDivElement;
+  private activeView: HTMLDivElement | null = null;
+  private currentPropertyOrder: string[] = [];
+  private readonly columnElements = new Map<string, HTMLTableColElement>();
+  private readonly headerElements = new Map<string, HTMLTableHeaderCellElement>();
+  private readonly activeColumnWidths = new Map<string, number>();
+  private activeResizeColumn: string | null = null;
+  private activeResizeColumnIndex: number | null = null;
+  private resizeStartX = 0;
+  private resizedColumnStartWidth = 0;
+  private activeResizeWidth = 0;
+  private activeResizeElement: HTMLElement | null = null;
+  private activeResizePointerId: number | null = null;
+  private draggingColumn: string | null = null;
+  private activeDragTarget: string | null = null;
+
+  private readonly onResizePointerMove = (event: PointerEvent) => {
+    if (
+      !this.activeResizeColumn ||
+      this.activeResizeColumnIndex === null
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const delta = event.clientX - this.resizeStartX;
+    const width = this.clampColumnWidth(
+      this.resizedColumnStartWidth + delta,
+      this.activeResizeColumnIndex === 0
+    );
+    this.activeResizeWidth = width;
+    this.activeColumnWidths.set(this.activeResizeColumn, width);
+    this.applyColumnWidth(this.activeResizeColumn, width);
+  };
+
+  private readonly onResizePointerUp = () => {
+    if (!this.activeResizeColumn || this.activeResizeColumnIndex === null) {
+      return;
+    }
+
+    this.activeResizeWidth = this.clampColumnWidth(
+      this.activeResizeWidth,
+      this.activeResizeColumnIndex === 0
+    );
+    this.activeColumnWidths.set(this.activeResizeColumn, this.activeResizeWidth);
+    this.applyColumnWidth(this.activeResizeColumn, this.activeResizeWidth);
+    this.persistColumnWidths();
+
+    this.stopColumnResize();
+  };
+
+  private readonly startColumnResize = (
+    event: PointerEvent,
+    propertyId: string,
+    index: number
+  ) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    this.activeResizeElement = event.currentTarget as HTMLElement | null;
+    this.activeResizePointerId = event.pointerId;
+    if (this.activeResizeElement && this.activeResizePointerId !== null) {
+      try {
+        this.activeResizeElement.setPointerCapture(this.activeResizePointerId);
+        this.activeResizeElement.style.userSelect = "none";
+      } catch {
+        // Pointer capture can fail in edge cases (e.g. certain webviews).
+      }
+    }
+    this.activeResizeColumn = propertyId;
+    this.activeResizeColumnIndex = index;
+    this.resizeStartX = event.clientX;
+    this.resizedColumnStartWidth = this.getColumnWidth(propertyId, index);
+    this.activeResizeWidth = this.resizedColumnStartWidth;
+
+    document.body.style.cursor = "col-resize";
+    document.addEventListener("pointermove", this.onResizePointerMove);
+    document.addEventListener("pointerup", this.onResizePointerUp);
+  };
+
+  private stopColumnResize() {
+    if (this.activeResizeElement && this.activeResizePointerId !== null) {
+      try {
+        this.activeResizeElement.releasePointerCapture(this.activeResizePointerId);
+      } catch {
+        // Pointer capture may not be active; ignore.
+      }
+    }
+
+    if (!this.activeResizeColumn) {
+      this.activeResizePointerId = null;
+      if (this.activeResizeElement) {
+        this.activeResizeElement.style.userSelect = "";
+      }
+      this.activeResizeElement = null;
+      return;
+    }
+
+    document.removeEventListener("pointermove", this.onResizePointerMove);
+    document.removeEventListener("pointerup", this.onResizePointerUp);
+    if (this.activeResizeElement) {
+      this.activeResizeElement.style.userSelect = "";
+    }
+    this.activeResizeColumn = null;
+    this.activeResizeColumnIndex = null;
+    this.activeResizeWidth = 0;
+    this.resizeStartX = 0;
+    this.resizedColumnStartWidth = 0;
+    this.activeResizePointerId = null;
+    this.activeResizeElement = null;
+    document.body.style.cursor = "";
+  }
 
   constructor(
     controller: QueryController,
@@ -256,6 +411,13 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
 
   private render() {
     this.root.empty();
+    this.currentPropertyOrder = [];
+    this.columnElements.clear();
+    this.headerElements.clear();
+    this.activeColumnWidths.clear();
+    this.stopColumnResize();
+    this.clearDragTargetStyles();
+    this.syncColumnWidths();
 
     if (!this.plugin.settings.freezeFirstColumn.enabled) {
       this.root.createDiv({
@@ -274,17 +436,65 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
       return;
     }
 
+    propertyOrder.forEach((propertyId, index) => {
+      const key = this.getPropertyId(propertyId);
+      const width = this.getColumnWidth(key, index);
+      this.currentPropertyOrder[index] = key;
+      this.activeColumnWidths.set(key, width);
+    });
+
     const view = this.root.createDiv("obsidian-hotfixes-frozen-bases-view");
+    this.activeView = view;
+    const firstPropertyId = propertyOrder.length > 0 ? this.getPropertyId(propertyOrder[0]) : null;
+    if (firstPropertyId) {
+      const width = this.getColumnWidth(firstPropertyId, 0);
+      view.style.setProperty("--obsidian-hotfixes-first-column-width", `${width}px`);
+    }
+
     const table = view.createEl("table", { cls: "obsidian-hotfixes-table" });
+    const colgroup = table.createEl("colgroup");
     const thead = table.createTHead();
     const headerRow = thead.createEl("tr");
 
-    for (const propertyId of propertyOrder) {
+    propertyOrder.forEach((propertyId, index) => {
+      const propertyKey = this.getPropertyId(propertyId);
+      const width = this.getColumnWidth(propertyKey, index);
+      const col = colgroup.createEl("col");
+      col.style.width = `${width}px`;
+      col.style.minWidth = `${width}px`;
+      col.style.maxWidth = `${width}px`;
+      col.dataset.propertyId = propertyKey;
+      this.columnElements.set(propertyKey, col);
+
       const name = this.config.getDisplayName(propertyId);
-      headerRow.createEl("th", {
-        text: name,
+      const header = headerRow.createEl("th", { text: name });
+      header.dataset.propertyId = propertyKey;
+      header.style.width = `${width}px`;
+      header.style.minWidth = `${width}px`;
+      header.style.maxWidth = `${width}px`;
+      header.draggable = true;
+      this.headerElements.set(propertyKey, header);
+
+      header.addEventListener("dragstart", (event) =>
+        this.onColumnDragStart(event, propertyKey)
+      );
+      header.addEventListener("dragover", (event) =>
+        this.onColumnDragOver(event, propertyKey)
+      );
+      header.addEventListener("drop", (event) =>
+        this.onColumnDrop(event, propertyKey)
+      );
+      header.addEventListener("dragleave", () => this.clearDragTargetStyles());
+      header.addEventListener("dragend", this.onColumnDragEnd);
+
+      const handle = header.createSpan({
+        cls: "obsidian-hotfixes-frozen-bases-resize-handle",
       });
-    }
+      handle.setAttr("draggable", "false");
+      handle.addEventListener("pointerdown", (event) =>
+        this.startColumnResize(event, propertyKey, index)
+      );
+    });
 
     const tbody = table.createTBody();
     const hasVisibleGrouping = this.data.groupedData.length > 1;
@@ -306,9 +516,16 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
 
       for (const entry of entries) {
         const row = tbody.createEl("tr");
-        for (const propertyId of propertyOrder) {
+        for (let index = 0; index < propertyOrder.length; index++) {
+          const propertyId = propertyOrder[index];
+          const propertyKey = this.getPropertyId(propertyId);
+          const width = this.getColumnWidth(propertyKey, index);
           const cell = row.createEl("td");
           const parsed = parsePropertyId(propertyId);
+          cell.dataset.propertyId = propertyKey;
+          cell.style.width = `${width}px`;
+          cell.style.minWidth = `${width}px`;
+          cell.style.maxWidth = `${width}px`;
 
           if (parsed.type === "file" && parsed.name === "name") {
             const link = cell.createEl("a", {
@@ -362,12 +579,224 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
     }
   }
 
-  private getPropertyOrder(): BasesPropertyId[] {
-    const explicitOrder = this.config.getOrder();
-    if (explicitOrder.length > 0) {
-      return explicitOrder;
+  private getPropertyId(propertyId: BasesPropertyId): string {
+    return String(propertyId);
+  }
+
+  private getDefaultFirstColumnWidth(): number {
+    return Math.max(
+      MIN_RESIZABLE_COLUMN_WIDTH_PX,
+      this.plugin.settings.freezeFirstColumn.firstColumnMinWidthPx,
+      DEFAULT_COLUMN_WIDTH_PX
+    );
+  }
+
+  private getSavedColumnWidths(): Map<string, number> {
+    const saved = this.config.get(COLUMN_WIDTHS_CONFIG_KEY);
+    const mapped = new Map<string, number>();
+
+    if (
+      saved &&
+      typeof saved === "object" &&
+      !Array.isArray(saved)
+    ) {
+      for (const [key, value] of Object.entries(saved)) {
+        const width = Number(value);
+        if (Number.isFinite(width)) {
+          mapped.set(key, width);
+        }
+      }
     }
+    return mapped;
+  }
+
+  private syncColumnWidths() {
+    const loaded = this.getSavedColumnWidths();
+    this.activeColumnWidths.clear();
+    for (const [key, value] of loaded.entries()) {
+      this.activeColumnWidths.set(key, value);
+    }
+  }
+
+  private getColumnWidth(
+    propertyId: string,
+    index: number
+  ): number {
+    const fallbackDefault = index === 0
+      ? this.getDefaultFirstColumnWidth()
+      : DEFAULT_COLUMN_WIDTH_PX;
+    const configured = this.activeColumnWidths.get(propertyId);
+    const width = typeof configured === "number" ? configured : fallbackDefault;
+    return this.clampColumnWidth(width, index === 0);
+  }
+
+  private clampColumnWidth(width: number, isFirstColumn = false): number {
+    const normalized = Math.max(width, MIN_RESIZABLE_COLUMN_WIDTH_PX);
+    if (!isFirstColumn) {
+      return normalized;
+    }
+
+    const settings = this.plugin.settings.freezeFirstColumn;
+    const min = Math.max(MIN_RESIZABLE_COLUMN_WIDTH_PX, settings.firstColumnMinWidthPx);
+    const max = Math.max(min, settings.firstColumnMaxWidthPx);
+    return Math.min(Math.max(normalized, min), max);
+  }
+
+  private applyColumnWidth(propertyId: string, width: number): void {
+    const isFirstColumn = this.currentPropertyOrder[0] === propertyId;
+    const normalized = this.clampColumnWidth(width, isFirstColumn);
+    const column = this.columnElements.get(propertyId);
+    if (column) {
+      column.style.width = `${normalized}px`;
+      column.style.minWidth = `${normalized}px`;
+      column.style.maxWidth = `${normalized}px`;
+    }
+
+    const header = this.headerElements.get(propertyId);
+    if (header) {
+      header.style.width = `${normalized}px`;
+      header.style.minWidth = `${normalized}px`;
+      header.style.maxWidth = `${normalized}px`;
+    }
+
+    if (isFirstColumn && this.activeView) {
+      this.activeView.style.setProperty(
+        "--obsidian-hotfixes-first-column-width",
+        `${normalized}px`
+      );
+    }
+  }
+
+  private persistColumnWidths() {
+    const serialized: Record<string, number> = {};
+    for (const [key, value] of this.activeColumnWidths.entries()) {
+      serialized[key] = value;
+    }
+    this.config.set(COLUMN_WIDTHS_CONFIG_KEY, serialized);
+  }
+
+  private persistColumnOrder(order: BasesPropertyId[]) {
+    this.config.set(
+      DRAGGABLE_ORDER_CONFIG_KEY,
+      order.map((propertyId) => this.getPropertyId(propertyId))
+    );
+  }
+
+  private safeAttributeValue(value: string) {
+    return value.replace(/"/g, '\\"');
+  }
+
+  private clearDragTargetStyles() {
+    this.root
+      .querySelectorAll<HTMLElement>(".obsidian-hotfixes-table th[data-drag-target]")
+      .forEach((headerCell) => {
+        headerCell.removeAttribute("data-drag-target");
+      });
+    this.activeDragTarget = null;
+  }
+
+  private onColumnDragStart(event: DragEvent, propertyId: string) {
+    if (event.dataTransfer) {
+      this.draggingColumn = propertyId;
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", propertyId);
+    }
+  }
+
+  private onColumnDragOver(event: DragEvent, propertyId: string) {
+    if (!this.draggingColumn || this.draggingColumn === propertyId) {
+      return;
+    }
+
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+    if (this.activeDragTarget === propertyId) {
+      return;
+    }
+
+    this.clearDragTargetStyles();
+    this.activeDragTarget = propertyId;
+    const headerCell = this.root.querySelector<HTMLElement>(
+      `th[data-property-id="${this.safeAttributeValue(propertyId)}"]`
+    );
+    if (headerCell) {
+      headerCell.setAttribute("data-drag-target", "true");
+    }
+  }
+
+  private onColumnDrop(event: DragEvent, targetPropertyId: string) {
+    event.preventDefault();
+    if (!this.draggingColumn || this.draggingColumn === targetPropertyId) {
+      return;
+    }
+
+    const order = this.getCurrentColumnOrder();
+    const sourceIndex = order.findIndex((propertyId) =>
+      this.getPropertyId(propertyId) === this.draggingColumn
+    );
+    const targetIndex = order.findIndex(
+      (propertyId) => this.getPropertyId(propertyId) === targetPropertyId
+    );
+    if (sourceIndex === -1 || targetIndex === -1) {
+      this.draggingColumn = null;
+      this.clearDragTargetStyles();
+      return;
+    }
+
+    order.splice(sourceIndex, 1);
+    order.splice(targetIndex, 0, this.draggingColumn as BasesPropertyId);
+    this.persistColumnOrder(order);
+    this.draggingColumn = null;
+    this.clearDragTargetStyles();
+    this.render();
+  }
+
+  private onColumnDragEnd = () => {
+    this.draggingColumn = null;
+    this.clearDragTargetStyles();
+  };
+
+  private getCurrentColumnOrder(): BasesPropertyId[] {
+    const explicitOrder = this.config.get(DRAGGABLE_ORDER_CONFIG_KEY);
+    if (Array.isArray(explicitOrder)) {
+      const available = new Set(this.data.properties.map((propertyId) =>
+        this.getPropertyId(propertyId)
+      ));
+      const seen = new Set<string>();
+      const normalized = explicitOrder
+        .map((value) =>
+          typeof value === "string" ? (value as BasesPropertyId) : null
+        )
+        .filter(
+          (value): value is BasesPropertyId =>
+            value !== null &&
+            available.has(this.getPropertyId(value)) &&
+            (seen.has(this.getPropertyId(value)) ? false : (seen.add(this.getPropertyId(value)), true))
+        );
+
+      if (normalized.length > 0) {
+        const normalizedSet = new Set(
+          normalized.map((propertyId) => this.getPropertyId(propertyId))
+        );
+        const missing = this.data.properties.filter(
+          (propertyId) => !normalizedSet.has(this.getPropertyId(propertyId))
+        );
+        return [...normalized, ...missing];
+      }
+    }
+
+    const explicitOrderFromApi = this.config.getOrder();
+    if (explicitOrderFromApi.length > 0) {
+      return explicitOrderFromApi;
+    }
+
     return this.data.properties;
+  }
+
+  private getPropertyOrder(): BasesPropertyId[] {
+    return this.getCurrentColumnOrder();
   }
 }
 
