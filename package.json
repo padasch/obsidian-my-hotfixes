@@ -1,0 +1,24 @@
+{
+  "name": "obsidian-my-hotfixes",
+  "version": "1.0.0",
+  "description": "A lightweight Obsidian plugin for personal hotfixes.",
+  "main": "main.js",
+  "author": "obsidian-hotfixes",
+  "license": "MIT",
+  "keywords": [
+    "obsidian",
+    "plugin"
+  ],
+  "homepage": "",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "build:prod": "node esbuild.config.mjs --production",
+    "clean": "rm -rf node_modules main.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "esbuild": "^0.25.8",
+    "obsidian": "^1.8.0",
+    "typescript": "^5.8.3"
+  }
+}

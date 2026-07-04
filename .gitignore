@@ -1,0 +1,4 @@
+node_modules/
+main.js.map
+npm-debug.log*
+yarn-error.log*
