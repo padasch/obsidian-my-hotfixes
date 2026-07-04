@@ -1,5 +1,6 @@
 import {
   App,
+  type BasesConfigFile,
   BasesView,
   type BasesViewConfig,
   HoverParent,
@@ -14,8 +15,11 @@ import {
   QueryController,
   Setting,
   TextComponent,
+  TFile,
+  ToggleComponent,
   UrlValue,
   parsePropertyId,
+  parseYaml,
   type BasesPropertyId,
 } from "obsidian";
 
@@ -33,6 +37,7 @@ const FROZEN_TABLE_EDIT_FEATURE_KEY = "obsidian-hotfixes:view-feature-edit-notes
 const FROZEN_TABLE_WRAP_MODE_FEATURE_KEY = "obsidian-hotfixes:view-feature-wrap-mode";
 const FROZEN_TABLE_TRUNCATE_FEATURE_KEY = "obsidian-hotfixes:view-feature-truncate";
 const FROZEN_TABLE_CELL_HEIGHT_FEATURE_KEY = "obsidian-hotfixes:view-feature-cell-height";
+const BASE_VIEW_SWITCHER_SELECTOR = ".obsidian-hotfixes-base-view-switcher";
 
 const DEFAULT_CELL_HEIGHT_PX = 34;
 
@@ -155,8 +160,15 @@ interface FreezeFirstColumnHotfixSettings {
   showDivider: boolean;
 }
 
+interface BaseViewSwitcherHotfixSettings {
+  enabled: boolean;
+  showInBaseFiles: boolean;
+  showInEmbeds: boolean;
+}
+
 interface HotfixSettings {
   freezeFirstColumn: FreezeFirstColumnHotfixSettings;
+  baseViewSwitcher: BaseViewSwitcherHotfixSettings;
 }
 
 const DEFAULT_SETTINGS: HotfixSettings = {
@@ -168,13 +180,33 @@ const DEFAULT_SETTINGS: HotfixSettings = {
     zIndex: 4,
     showDivider: true,
   },
+  baseViewSwitcher: {
+    enabled: false,
+    showInBaseFiles: true,
+    showInEmbeds: true,
+  },
 };
+
+interface BaseViewDefinition {
+  name: string;
+}
+
+interface BaseViewSwitcherTarget {
+  headerEl: HTMLElement;
+  baseFile: TFile;
+  nativeViewButton: HTMLElement | null;
+  activeViewName: string | null;
+}
 
 export default class ObsidianHotfixesPlugin extends Plugin {
   settings: HotfixSettings = {
     freezeFirstColumn: { ...DEFAULT_SETTINGS.freezeFirstColumn },
+    baseViewSwitcher: { ...DEFAULT_SETTINGS.baseViewSwitcher },
   };
   private styleElement: HTMLStyleElement | null = null;
+  private baseViewSwitcherObserver: MutationObserver | null = null;
+  private baseViewSwitcherRefreshFrame: number | null = null;
+  private baseViewSwitcherRefreshToken = 0;
 
   async onload() {
     await this.loadSettings();
@@ -228,10 +260,10 @@ export default class ObsidianHotfixesPlugin extends Plugin {
                 displayName: "Cell height (px)",
                 default: featureSettings.cellHeightPx,
                 instant: true,
-                min: 18,
-                max: 96,
+                min: 1,
+                max: 100,
                 step: 1,
-                displayFormat: (value) => `${value}px`,
+                displayFormat: (value: number) => `${value}px`,
               },
             ],
           },
@@ -245,18 +277,36 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     }
 
     this.registerEvent(
-      this.app.workspace.on("active-leaf-change", () => this.applyStyles())
+      this.app.workspace.on("active-leaf-change", () => {
+        this.applyStyles();
+        this.scheduleBaseViewSwitcherRefresh();
+      })
     );
     this.registerEvent(
-      this.app.workspace.on("layout-change", () => this.refreshOpenFrozenViews())
+      this.app.workspace.on("layout-change", () => {
+        this.refreshOpenFrozenViews();
+        this.scheduleBaseViewSwitcherRefresh();
+      })
     );
     this.registerEvent(
-      this.app.workspace.on("file-open", () => this.refreshOpenFrozenViews())
+      this.app.workspace.on("file-open", () => {
+        this.refreshOpenFrozenViews();
+        this.scheduleBaseViewSwitcherRefresh();
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (file instanceof TFile && file.extension === "base") {
+          this.scheduleBaseViewSwitcherRefresh();
+        }
+      })
     );
     this.registerDomEvent(window, "resize", () => this.refreshOpenFrozenViews());
+    this.configureBaseViewSwitcher();
   }
 
   onunload() {
+    this.stopBaseViewSwitcher();
     if (this.styleElement) {
       this.styleElement.remove();
       this.styleElement = null;
@@ -276,6 +326,10 @@ export default class ObsidianHotfixesPlugin extends Plugin {
         ...DEFAULT_SETTINGS.freezeFirstColumn,
         ...(loaded?.freezeFirstColumn ?? {}),
       },
+      baseViewSwitcher: {
+        ...DEFAULT_SETTINGS.baseViewSwitcher,
+        ...(loaded?.baseViewSwitcher ?? {}),
+      },
     };
   }
 
@@ -283,6 +337,7 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     await this.saveData(this.settings);
     this.applyStyles();
     this.refreshOpenFrozenViews();
+    this.configureBaseViewSwitcher();
   }
 
   private applyStyles() {
@@ -445,6 +500,48 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   padding: 0.75rem 0.5rem;
 }
 
+.obsidian-hotfixes-base-view-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+}
+
+.obsidian-hotfixes-base-view-switcher-button {
+  height: 26px;
+  max-width: 220px;
+  padding: 0 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  line-height: 24px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.obsidian-hotfixes-base-view-switcher-button:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.obsidian-hotfixes-base-view-switcher-button[aria-current="true"] {
+  border-color: var(--interactive-accent);
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.obsidian-hotfixes-base-view-switcher-button:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
 .obsidian-hotfixes-setting-section {
   border: 1px solid var(--background-modifier-border);
   border-radius: 8px;
@@ -483,6 +580,458 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       ...updates,
     };
     await this.saveSettings();
+  }
+
+  async updateBaseViewSwitcher(
+    updates: Partial<BaseViewSwitcherHotfixSettings>
+  ) {
+    this.settings.baseViewSwitcher = {
+      ...this.settings.baseViewSwitcher,
+      ...updates,
+    };
+    await this.saveSettings();
+  }
+
+  private configureBaseViewSwitcher() {
+    if (this.settings.baseViewSwitcher.enabled) {
+      this.startBaseViewSwitcher();
+      return;
+    }
+
+    this.stopBaseViewSwitcher();
+  }
+
+  private startBaseViewSwitcher() {
+    if (!this.baseViewSwitcherObserver) {
+      this.baseViewSwitcherObserver = new MutationObserver(() => {
+        this.scheduleBaseViewSwitcherRefresh();
+      });
+      this.baseViewSwitcherObserver.observe(document.body, {
+        childList: true,
+        subtree: true,
+      });
+    }
+
+    this.scheduleBaseViewSwitcherRefresh();
+  }
+
+  private stopBaseViewSwitcher() {
+    if (this.baseViewSwitcherRefreshFrame !== null) {
+      window.cancelAnimationFrame(this.baseViewSwitcherRefreshFrame);
+      this.baseViewSwitcherRefreshFrame = null;
+    }
+
+    this.baseViewSwitcherRefreshToken++;
+    if (this.baseViewSwitcherObserver) {
+      this.baseViewSwitcherObserver.disconnect();
+      this.baseViewSwitcherObserver = null;
+    }
+
+    document
+      .querySelectorAll<HTMLElement>(BASE_VIEW_SWITCHER_SELECTOR)
+      .forEach((row) => row.remove());
+  }
+
+  private scheduleBaseViewSwitcherRefresh() {
+    if (!this.settings.baseViewSwitcher.enabled) {
+      return;
+    }
+
+    if (this.baseViewSwitcherRefreshFrame !== null) {
+      return;
+    }
+
+    this.baseViewSwitcherRefreshFrame = window.requestAnimationFrame(() => {
+      this.baseViewSwitcherRefreshFrame = null;
+      void this.refreshBaseViewSwitchers();
+    });
+  }
+
+  private async refreshBaseViewSwitchers() {
+    const token = ++this.baseViewSwitcherRefreshToken;
+    if (!this.settings.baseViewSwitcher.enabled) {
+      return;
+    }
+
+    this.removeOrphanedBaseViewSwitchers();
+    const targets = this.findBaseViewSwitcherTargets();
+
+    for (const target of targets) {
+      if (token !== this.baseViewSwitcherRefreshToken) {
+        return;
+      }
+
+      await this.renderBaseViewSwitcher(target);
+    }
+  }
+
+  private removeOrphanedBaseViewSwitchers() {
+    document
+      .querySelectorAll<HTMLElement>(BASE_VIEW_SWITCHER_SELECTOR)
+      .forEach((row) => {
+        if (!row.nextElementSibling?.matches(".bases-header")) {
+          row.remove();
+        }
+      });
+  }
+
+  private findBaseViewSwitcherTargets(): BaseViewSwitcherTarget[] {
+    const settings = this.settings.baseViewSwitcher;
+    const targets: BaseViewSwitcherTarget[] = [];
+    const seenHeaders = new Set<HTMLElement>();
+    const headers = document.querySelectorAll<HTMLElement>(".bases-header");
+
+    headers.forEach((headerEl) => {
+      if (seenHeaders.has(headerEl)) {
+        return;
+      }
+      seenHeaders.add(headerEl);
+
+      const embedEl = headerEl.closest<HTMLElement>(".bases-embed");
+      const owner = this.getOwningFileView(headerEl);
+      const sourcePath = owner?.file?.path ?? "";
+      const isEmbeddedBase = embedEl !== null;
+
+      if (isEmbeddedBase && !settings.showInEmbeds) {
+        this.removeBaseViewSwitcherBefore(headerEl);
+        return;
+      }
+
+      if (!isEmbeddedBase && !settings.showInBaseFiles) {
+        this.removeBaseViewSwitcherBefore(headerEl);
+        return;
+      }
+
+      const baseFile = embedEl
+        ? this.resolveEmbeddedBaseFile(embedEl, sourcePath)
+        : owner?.file instanceof TFile && owner.file.extension === "base"
+          ? owner.file
+          : null;
+
+      if (!baseFile) {
+        this.removeBaseViewSwitcherBefore(headerEl);
+        return;
+      }
+
+      const nativeViewButton = this.findNativeBaseViewButton(headerEl);
+      targets.push({
+        headerEl,
+        baseFile,
+        nativeViewButton,
+        activeViewName: nativeViewButton
+          ? this.normalizeText(
+              nativeViewButton.innerText ||
+                nativeViewButton.textContent ||
+                ""
+            )
+          : null,
+      });
+    });
+
+    return targets;
+  }
+
+  private getOwningFileView(element: HTMLElement): {
+    containerEl: HTMLElement;
+    file: TFile | null;
+  } | null {
+    let owner: { containerEl: HTMLElement; file: TFile | null } | null = null;
+
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (owner) {
+        return;
+      }
+
+      const view = leaf.view as unknown as {
+        containerEl?: HTMLElement;
+        file?: unknown;
+      };
+
+      if (view.containerEl?.contains(element)) {
+        owner = {
+          containerEl: view.containerEl,
+          file: view.file instanceof TFile ? view.file : null,
+        };
+      }
+    });
+
+    return owner;
+  }
+
+  private resolveEmbeddedBaseFile(
+    embedEl: HTMLElement,
+    sourcePath: string
+  ): TFile | null {
+    const candidateElements = [
+      embedEl,
+      embedEl.closest<HTMLElement>(".internal-embed"),
+    ].filter((element): element is HTMLElement => element !== null);
+    const candidates: string[] = [];
+
+    for (const element of candidateElements) {
+      candidates.push(
+        element.getAttribute("src") ?? "",
+        element.getAttribute("data-src") ?? "",
+        element.getAttribute("data-path") ?? "",
+        element.getAttribute("alt") ?? ""
+      );
+    }
+
+    for (const candidate of candidates) {
+      const linkpath = this.normalizeBaseLinkCandidate(candidate);
+      if (!linkpath) {
+        continue;
+      }
+
+      const directFile = this.app.vault.getFileByPath(linkpath);
+      if (directFile?.extension === "base") {
+        return directFile;
+      }
+
+      const resolved = this.app.metadataCache.getFirstLinkpathDest(
+        linkpath,
+        sourcePath
+      );
+      if (resolved instanceof TFile && resolved.extension === "base") {
+        return resolved;
+      }
+    }
+
+    return null;
+  }
+
+  private normalizeBaseLinkCandidate(value: string): string | null {
+    let candidate = value.trim();
+    if (!candidate) {
+      return null;
+    }
+
+    try {
+      candidate = decodeURIComponent(candidate);
+    } catch {
+      // Keep the original value when it is not URI-encoded.
+    }
+
+    candidate = candidate
+      .replace(/^!\[\[/, "")
+      .replace(/^\[\[/, "")
+      .replace(/\]\]$/, "")
+      .split("|")[0]
+      .split("#")[0]
+      .trim();
+
+    if (!candidate) {
+      return null;
+    }
+
+    return candidate;
+  }
+
+  private findNativeBaseViewButton(headerEl: HTMLElement): HTMLElement | null {
+    const preferredSelectors = [
+      ".bases-toolbar-view-menu",
+      ".bases-toolbar-item.mod-view",
+      ".bases-toolbar-item.mod-view-menu",
+    ];
+
+    for (const selector of preferredSelectors) {
+      const found = headerEl.querySelector<HTMLElement>(selector);
+      if (found) {
+        return found;
+      }
+    }
+
+    return headerEl.querySelector<HTMLElement>(
+      ".bases-toolbar-item, button, [role='button']"
+    );
+  }
+
+  private async renderBaseViewSwitcher(target: BaseViewSwitcherTarget) {
+    if (!target.headerEl.isConnected) {
+      return;
+    }
+
+    const views = await this.readBaseViewDefinitions(target.baseFile);
+    if (!target.headerEl.isConnected) {
+      return;
+    }
+
+    if (views.length < 2) {
+      this.removeBaseViewSwitcherBefore(target.headerEl);
+      return;
+    }
+
+    const parent = target.headerEl.parentElement;
+    if (!parent) {
+      return;
+    }
+
+    let row = this.getBaseViewSwitcherBefore(target.headerEl);
+    if (!row) {
+      row = document.createElement("div");
+      row.className = "obsidian-hotfixes-base-view-switcher";
+      parent.insertBefore(row, target.headerEl);
+    }
+
+    const activeViewName = this.findActiveBaseViewName(
+      target.activeViewName,
+      views
+    );
+
+    row.empty();
+    row.dataset.basePath = target.baseFile.path;
+    row.setAttribute("role", "toolbar");
+    row.setAttribute("aria-label", "Base views");
+
+    for (const view of views) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "obsidian-hotfixes-base-view-switcher-button";
+      button.textContent = view.name;
+      button.title = `${target.baseFile.basename}: ${view.name}`;
+      button.dataset.viewName = view.name;
+      if (view.name === activeViewName) {
+        button.setAttribute("aria-current", "true");
+      }
+
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (button.getAttribute("aria-current") === "true") {
+          return;
+        }
+        void this.switchBaseToView(target.headerEl, view.name);
+      });
+
+      row.appendChild(button);
+    }
+  }
+
+  private async readBaseViewDefinitions(
+    baseFile: TFile
+  ): Promise<BaseViewDefinition[]> {
+    try {
+      const content = await this.app.vault.cachedRead(baseFile);
+      const config = parseYaml(content) as BasesConfigFile | null;
+      if (!config || !Array.isArray(config.views)) {
+        return [];
+      }
+
+      return config.views
+        .map((view) => ({
+          name: typeof view?.name === "string" ? view.name.trim() : "",
+        }))
+        .filter((view) => view.name.length > 0);
+    } catch (error) {
+      console.warn(
+        "[Obsidian Hotfixes] Failed to read Base views.",
+        baseFile.path,
+        error
+      );
+      return [];
+    }
+  }
+
+  private getBaseViewSwitcherBefore(headerEl: HTMLElement): HTMLElement | null {
+    const previous = headerEl.previousElementSibling;
+    if (
+      previous instanceof HTMLElement &&
+      previous.matches(BASE_VIEW_SWITCHER_SELECTOR)
+    ) {
+      return previous;
+    }
+
+    return null;
+  }
+
+  private removeBaseViewSwitcherBefore(headerEl: HTMLElement) {
+    this.getBaseViewSwitcherBefore(headerEl)?.remove();
+  }
+
+  private findActiveBaseViewName(
+    label: string | null,
+    views: BaseViewDefinition[]
+  ): string | null {
+    if (!label) {
+      return null;
+    }
+
+    const normalizedLabel = this.normalizeText(label);
+    const exact = views.find(
+      (view) => this.normalizeText(view.name) === normalizedLabel
+    );
+    if (exact) {
+      return exact.name;
+    }
+
+    const contained = views.find((view) =>
+      normalizedLabel.includes(this.normalizeText(view.name))
+    );
+    return contained?.name ?? null;
+  }
+
+  private async switchBaseToView(headerEl: HTMLElement, viewName: string) {
+    const nativeViewButton = this.findNativeBaseViewButton(headerEl);
+    if (!nativeViewButton) {
+      return;
+    }
+
+    const menuItemsBefore = new Set(
+      Array.from(
+        document.querySelectorAll<HTMLElement>(".menu-item, [role='menuitem']")
+      )
+    );
+
+    nativeViewButton.click();
+    await this.nextAnimationFrame();
+    await this.nextAnimationFrame();
+
+    const newMenuItems = Array.from(
+      document.querySelectorAll<HTMLElement>(".menu-item, [role='menuitem']")
+    ).filter((item) => !menuItemsBefore.has(item));
+    const candidates = newMenuItems.length > 0
+      ? newMenuItems
+      : Array.from(
+          document.querySelectorAll<HTMLElement>(".menu-item, [role='menuitem']")
+        );
+    const targetItem = this.findMenuItemForView(candidates, viewName);
+
+    if (!targetItem) {
+      return;
+    }
+
+    targetItem.click();
+    window.setTimeout(() => this.scheduleBaseViewSwitcherRefresh(), 80);
+  }
+
+  private findMenuItemForView(
+    menuItems: HTMLElement[],
+    viewName: string
+  ): HTMLElement | null {
+    const normalizedViewName = this.normalizeText(viewName);
+    const exact = menuItems.find((item) =>
+      this.normalizeText(item.innerText || item.textContent || "") ===
+      normalizedViewName
+    );
+    if (exact) {
+      return exact;
+    }
+
+    return menuItems.find((item) => {
+      const rawText = item.innerText || item.textContent || "";
+      const firstLine = rawText.split(/\r?\n/u)[0] ?? "";
+      return this.normalizeText(firstLine) === normalizedViewName;
+    }) ?? null;
+  }
+
+  private normalizeText(value: string): string {
+    return value.replace(/\s+/g, " ").trim();
+  }
+
+  private nextAnimationFrame(): Promise<void> {
+    return new Promise((resolve) => {
+      window.requestAnimationFrame(() => resolve());
+    });
   }
 }
 
@@ -644,8 +1193,8 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
 
     const features = getFrozenTableViewFeatures(this.config);
     const cellHeight = Math.max(
-      18,
-      Math.min(96, Math.round(features.cellHeightPx))
+      1,
+      Math.min(100, Math.round(features.cellHeightPx))
     );
     this.root.className = `obsidian-hotfixes-frozen-bases-root obsidian-hotfixes-wrap-${features.wrapMode}`;
     this.root.style.setProperty(
@@ -1302,6 +1851,8 @@ class HotfixesSettingTab extends PluginSettingTab {
   private maxWidthInput: TextComponent | null = null;
   private backgroundInput: TextComponent | null = null;
   private zIndexInput: TextComponent | null = null;
+  private baseFileToggle: ToggleComponent | null = null;
+  private embeddedBaseToggle: ToggleComponent | null = null;
 
   constructor(app: App, plugin: ObsidianHotfixesPlugin) {
     super(app, plugin);
@@ -1313,6 +1864,11 @@ class HotfixesSettingTab extends PluginSettingTab {
     if (this.maxWidthInput) this.maxWidthInput.setDisabled(!enabled);
     if (this.backgroundInput) this.backgroundInput.setDisabled(!enabled);
     if (this.zIndexInput) this.zIndexInput.setDisabled(!enabled);
+  }
+
+  private setBaseViewSwitcherSectionEnabled(enabled: boolean) {
+    if (this.baseFileToggle) this.baseFileToggle.setDisabled(!enabled);
+    if (this.embeddedBaseToggle) this.embeddedBaseToggle.setDisabled(!enabled);
   }
 
   display() {
@@ -1428,5 +1984,53 @@ class HotfixesSettingTab extends PluginSettingTab {
       });
 
     this.setSectionEnabled(state.enabled);
+
+    const switcherDetails = containerEl.createEl("details", {
+      cls: "obsidian-hotfixes-setting-section",
+    });
+    switcherDetails.createEl("summary", {
+      text: "Bases: Quick view switcher",
+    });
+    const switcherSection = switcherDetails.createEl("div", {
+      cls: "obsidian-hotfixes-setting-section-content",
+    });
+    const switcherState = this.plugin.settings.baseViewSwitcher;
+
+    new Setting(switcherSection)
+      .setName("Enable view switcher row")
+      .setDesc("Add compact buttons above each Base for jumping between its views.")
+      .addToggle((toggle) => {
+        toggle.setValue(switcherState.enabled);
+        toggle.onChange(async (value) => {
+          await this.plugin.updateBaseViewSwitcher({ enabled: value });
+          this.setBaseViewSwitcherSectionEnabled(value);
+        });
+      });
+
+    new Setting(switcherSection)
+      .setName("Show above opened .base files")
+      .setDesc("Add the row when a Base file is opened directly.")
+      .addToggle((toggle) => {
+        this.baseFileToggle = toggle;
+        toggle.setValue(switcherState.showInBaseFiles);
+        toggle.setDisabled(!switcherState.enabled);
+        toggle.onChange(async (value) => {
+          await this.plugin.updateBaseViewSwitcher({ showInBaseFiles: value });
+        });
+      });
+
+    new Setting(switcherSection)
+      .setName("Show above embedded Bases")
+      .setDesc("Add the row for embedded .base files in notes.")
+      .addToggle((toggle) => {
+        this.embeddedBaseToggle = toggle;
+        toggle.setValue(switcherState.showInEmbeds);
+        toggle.setDisabled(!switcherState.enabled);
+        toggle.onChange(async (value) => {
+          await this.plugin.updateBaseViewSwitcher({ showInEmbeds: value });
+        });
+      });
+
+    this.setBaseViewSwitcherSectionEnabled(switcherState.enabled);
   }
 }
