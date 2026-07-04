@@ -18,16 +18,20 @@
 }
 
 .obsidian-hotfixes-base-view-switcher {
+  position: relative;
+  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   align-items: center;
+  pointer-events: auto;
   padding: 6px 8px;
   border-bottom: 1px solid var(--background-modifier-border);
   background: var(--background-primary);
 }
 
 .obsidian-hotfixes-base-view-switcher-button {
+  pointer-events: auto;
   height: 26px;
   max-width: 220px;
   padding: 0 8px;

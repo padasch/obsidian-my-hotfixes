@@ -194,8 +194,6 @@ interface BaseViewDefinition {
 interface BaseViewSwitcherTarget {
   headerEl: HTMLElement;
   baseFile: TFile;
-  nativeViewButton: HTMLElement | null;
-  activeViewName: string | null;
 }
 
 export default class ObsidianHotfixesPlugin extends Plugin {
@@ -505,16 +503,20 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 }
 
 .obsidian-hotfixes-base-view-switcher {
+  position: relative;
+  z-index: 2;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   align-items: center;
+  pointer-events: auto;
   padding: 6px 8px;
   border-bottom: 1px solid var(--background-modifier-border);
   background: var(--background-primary);
 }
 
 .obsidian-hotfixes-base-view-switcher-button {
+  pointer-events: auto;
   height: 26px;
   max-width: 220px;
   padding: 0 8px;
@@ -717,18 +719,9 @@ export default class ObsidianHotfixesPlugin extends Plugin {
         return;
       }
 
-      const nativeViewButton = this.findNativeBaseViewButton(headerEl);
       targets.push({
         headerEl,
         baseFile,
-        nativeViewButton,
-        activeViewName: nativeViewButton
-          ? this.normalizeText(
-              nativeViewButton.innerText ||
-                nativeViewButton.textContent ||
-                ""
-            )
-          : null,
       });
     });
 
@@ -831,7 +824,10 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     return candidate;
   }
 
-  private findNativeBaseViewButton(headerEl: HTMLElement): HTMLElement | null {
+  private findNativeBaseViewButton(
+    headerEl: HTMLElement,
+    viewNames: string[] = []
+  ): HTMLElement | null {
     const preferredSelectors = [
       ".bases-toolbar-view-menu",
       ".bases-toolbar-item.mod-view",
@@ -845,9 +841,49 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       }
     }
 
-    return headerEl.querySelector<HTMLElement>(
-      ".bases-toolbar-item, button, [role='button']"
+    const normalizedViewNames = new Set(
+      viewNames.map((viewName) => this.normalizeText(viewName))
     );
+    const candidates = Array.from(
+      headerEl.querySelectorAll<HTMLElement>(
+        ".bases-toolbar-item, button, [role='button']"
+      )
+    ).filter((candidate) => this.isVisibleElement(candidate));
+
+    const matchingText = candidates.find((candidate) => {
+      const candidateText = this.normalizeText(
+        candidate.innerText || candidate.textContent || ""
+      );
+      if (!candidateText) {
+        return false;
+      }
+
+      for (const viewName of normalizedViewNames) {
+        if (candidateText === viewName || candidateText.includes(viewName)) {
+          return true;
+        }
+      }
+
+      return false;
+    });
+    if (matchingText) {
+      return matchingText;
+    }
+
+    const ariaViewButton = candidates.find((candidate) =>
+      this.normalizeText(
+        candidate.getAttribute("aria-label") ||
+          candidate.getAttribute("title") ||
+          ""
+      )
+        .toLowerCase()
+        .includes("view")
+    );
+    if (ariaViewButton) {
+      return ariaViewButton;
+    }
+
+    return candidates[0] ?? null;
   }
 
   private async renderBaseViewSwitcher(target: BaseViewSwitcherTarget) {
@@ -877,8 +913,16 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       parent.insertBefore(row, target.headerEl);
     }
 
+    const nativeViewButton = this.findNativeBaseViewButton(
+      target.headerEl,
+      views.map((view) => view.name)
+    );
     const activeViewName = this.findActiveBaseViewName(
-      target.activeViewName,
+      nativeViewButton
+        ? this.normalizeText(
+            nativeViewButton.innerText || nativeViewButton.textContent || ""
+          )
+        : null,
       views
     );
 
@@ -897,6 +941,13 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       if (view.name === activeViewName) {
         button.setAttribute("aria-current", "true");
       }
+
+      button.addEventListener("pointerdown", (event) => {
+        event.stopPropagation();
+      });
+      button.addEventListener("mousedown", (event) => {
+        event.stopPropagation();
+      });
 
       button.addEventListener("click", (event) => {
         event.preventDefault();
@@ -975,8 +1026,19 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   }
 
   private async switchBaseToView(headerEl: HTMLElement, viewName: string) {
-    const nativeViewButton = this.findNativeBaseViewButton(headerEl);
+    const row = this.getBaseViewSwitcherBefore(headerEl);
+    const viewNames = row
+      ? Array.from(
+          row.querySelectorAll<HTMLElement>(
+            ".obsidian-hotfixes-base-view-switcher-button"
+          )
+        ).map((button) => button.dataset.viewName ?? button.textContent ?? "")
+      : [];
+    const nativeViewButton = this.findNativeBaseViewButton(headerEl, viewNames);
     if (!nativeViewButton) {
+      console.warn(
+        "[Obsidian Hotfixes] Could not find native Bases view menu button."
+      );
       return;
     }
 
@@ -986,13 +1048,9 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       )
     );
 
-    nativeViewButton.click();
-    await this.nextAnimationFrame();
-    await this.nextAnimationFrame();
+    this.activateElement(nativeViewButton);
 
-    const newMenuItems = Array.from(
-      document.querySelectorAll<HTMLElement>(".menu-item, [role='menuitem']")
-    ).filter((item) => !menuItemsBefore.has(item));
+    const newMenuItems = await this.waitForNewMenuItems(menuItemsBefore);
     const candidates = newMenuItems.length > 0
       ? newMenuItems
       : Array.from(
@@ -1001,10 +1059,14 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     const targetItem = this.findMenuItemForView(candidates, viewName);
 
     if (!targetItem) {
+      console.warn(
+        "[Obsidian Hotfixes] Could not find Bases view menu item.",
+        viewName
+      );
       return;
     }
 
-    targetItem.click();
+    this.activateElement(targetItem);
     window.setTimeout(() => this.scheduleBaseViewSwitcherRefresh(), 80);
   }
 
@@ -1030,6 +1092,81 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 
   private normalizeText(value: string): string {
     return value.replace(/\s+/g, " ").trim();
+  }
+
+  private isVisibleElement(element: HTMLElement): boolean {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      style.display !== "none" &&
+      style.visibility !== "hidden"
+    );
+  }
+
+  private activateElement(element: HTMLElement) {
+    element.focus();
+    const downEventInit: MouseEventInit = {
+      bubbles: true,
+      cancelable: true,
+      view: window,
+      button: 0,
+      buttons: 1,
+    };
+    const upEventInit: MouseEventInit = {
+      ...downEventInit,
+      buttons: 0,
+    };
+    const pointerDownEventInit: PointerEventInit = {
+      ...downEventInit,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+    };
+    const pointerUpEventInit: PointerEventInit = {
+      ...upEventInit,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+    };
+
+    try {
+      element.dispatchEvent(new PointerEvent("pointerdown", pointerDownEventInit));
+      element.dispatchEvent(new MouseEvent("mousedown", downEventInit));
+      element.dispatchEvent(new PointerEvent("pointerup", pointerUpEventInit));
+      element.dispatchEvent(new MouseEvent("mouseup", upEventInit));
+    } catch {
+      element.dispatchEvent(new MouseEvent("mousedown", downEventInit));
+      element.dispatchEvent(new MouseEvent("mouseup", upEventInit));
+    }
+
+    element.dispatchEvent(new MouseEvent("click", upEventInit));
+  }
+
+  private async waitForNewMenuItems(
+    existingMenuItems: Set<HTMLElement>,
+    timeoutMs = 600
+  ): Promise<HTMLElement[]> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      await this.nextAnimationFrame();
+      const menuItems = Array.from(
+        document.querySelectorAll<HTMLElement>(".menu-item, [role='menuitem']")
+      ).filter(
+        (item) =>
+          item.isConnected &&
+          !existingMenuItems.has(item) &&
+          this.isVisibleElement(item)
+      );
+
+      if (menuItems.length > 0) {
+        return menuItems;
+      }
+    }
+
+    return [];
   }
 
   private nextAnimationFrame(): Promise<void> {
