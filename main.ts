@@ -121,6 +121,7 @@ ${selector} table tr th:first-child {
   left: ${config.leftOffsetPx}px;
   background: ${config.backgroundColor};
   z-index: ${config.zIndex};
+  width: ${config.firstColumnMaxWidthPx}px;
   min-width: 120px;
   max-width: ${config.firstColumnMaxWidthPx}px;
   ${divider}
