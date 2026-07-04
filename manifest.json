@@ -1,7 +1,7 @@
 {
   "id": "obsidian-my-hotfixes",
   "name": "Obsidian My Hotfixes",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.6.0",
   "description": "A collection of personal Obsidian hotfixes behind a compact settings UI.",
   "author": "obsidian-my-hotfixes",

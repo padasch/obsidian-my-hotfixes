@@ -88,20 +88,39 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     }
 
     const config = this.settings.freezeFirstColumn;
-    const safeSelector = (config.selector || DEFAULT_FIRST_COLUMN_SELECTOR).trim();
+    const selector = (config.selector || DEFAULT_FIRST_COLUMN_SELECTOR).trim();
     const divider = config.showDivider
       ? "box-shadow: 1px 0 0 var(--background-modifier-border);"
       : "";
 
     this.styleElement.textContent = `
-${safeSelector} {
-  overflow-x: auto;
+${selector} {
+  position: relative;
 }
 
-${safeSelector} .bases-td:first-of-type,
-${safeSelector} .bases-th:first-of-type,
-${safeSelector} table tr td:first-child,
-${safeSelector} table tr th:first-child {
+${selector} .bases-table {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+${selector} .bases-table table {
+  width: 100%;
+  min-width: max-content;
+  max-width: none;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+${selector} .bases-thead,
+${selector} .bases-tbody {
+  width: max-content;
+  min-width: 100%;
+}
+
+${selector} .bases-td:first-of-type,
+${selector} .bases-th:first-of-type,
+${selector} table tr td:first-child,
+${selector} table tr th:first-child {
   position: sticky;
   left: ${config.leftOffsetPx}px;
   background: ${config.backgroundColor};
@@ -109,9 +128,12 @@ ${safeSelector} table tr th:first-child {
   ${divider}
 }
 
-${safeSelector} .bases-th:first-of-type,
-${safeSelector} thead th:first-child {
+${selector} .bases-th:first-of-type,
+${selector} thead th:first-child {
   z-index: ${config.zIndex + 1};
+  position: sticky;
+  left: ${config.leftOffsetPx}px;
+  background: ${config.backgroundColor};
 }
 `.trim();
   }
