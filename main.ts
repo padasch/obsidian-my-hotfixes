@@ -233,7 +233,8 @@ ${selector} .obsidian-hotfixes-hide-original-first-column {
       return;
     }
 
-    const overlayWidth = this.measureFrozenColumnWidth(rows, config.firstColumnMaxWidthPx);
+    const referenceColumn = rows.find((row) => row.section === "thead")?.firstCell ?? rows[0].firstCell;
+    const overlayWidth = this.measureFrozenColumnWidth(referenceColumn, rows, config.firstColumnMaxWidthPx);
 
     for (const rowLike of rows) {
       const firstCell = rowLike.firstCell;
@@ -282,6 +283,7 @@ ${selector} .obsidian-hotfixes-hide-original-first-column {
 
   private findHorizontalScrollContainer(root: HTMLElement): HTMLElement {
     const directCandidates = [
+      root.querySelector<HTMLElement>(".bases-view"),
       root.querySelector<HTMLElement>(".bases-table"),
       root.querySelector<HTMLElement>(".bases-table-container"),
       root.querySelector<HTMLElement>(".bases-viewport"),
@@ -356,16 +358,31 @@ ${selector} .obsidian-hotfixes-hide-original-first-column {
   }
 
   private measureFrozenColumnWidth(
+    referenceColumn: HTMLElement,
     rows: TableRowLike[],
     maxWidth: number
   ): number {
-    const candidateWidth = rows.reduce<number>((acc, rowLike) => {
-      const rect = rowLike.firstCell.getBoundingClientRect();
-      return Math.max(acc, Math.ceil(rect.width), rowLike.firstCell.offsetWidth);
+    const candidateWidth = this.measureElementWidth(referenceColumn);
+    const fallbackWidth = rows.reduce<number>((acc, rowLike) => {
+      const rowWidth = this.measureElementWidth(rowLike.firstCell);
+      return Math.max(acc, rowWidth);
     }, 0);
 
-    const resolved = Math.max(80, candidateWidth || maxWidth);
-    return Math.min(maxWidth, resolved);
+    const resolved = candidateWidth || fallbackWidth;
+    return Math.min(maxWidth, Math.max(80, resolved));
+  }
+
+  private measureElementWidth(cell: HTMLElement): number {
+    const style = window.getComputedStyle(cell);
+    const explicitWidth = Number.parseFloat(style.width);
+    if (Number.isFinite(explicitWidth) && explicitWidth > 0) {
+      return Math.ceil(explicitWidth);
+    }
+    const rectWidth = Math.ceil(cell.getBoundingClientRect().width);
+    if (Number.isFinite(rectWidth) && rectWidth > 0) {
+      return rectWidth;
+    }
+    return Math.ceil(cell.offsetWidth);
   }
 
   private bindOverlayScrollSync(
