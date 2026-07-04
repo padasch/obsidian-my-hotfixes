@@ -17,6 +17,7 @@ interface FreezeFirstColumnHotfixSettings {
   backgroundColor: string;
   zIndex: number;
   showDivider: boolean;
+  firstColumnMaxWidthPx: number;
 }
 
 interface HotfixSettings {
@@ -31,6 +32,7 @@ const DEFAULT_SETTINGS: HotfixSettings = {
     backgroundColor: "var(--background-primary)",
     zIndex: 3,
     showDivider: true,
+    firstColumnMaxWidthPx: 280,
   },
 };
 
@@ -104,17 +106,11 @@ ${selector} .bases-table {
 }
 
 ${selector} .bases-table table {
-  width: 100%;
-  min-width: max-content;
-  max-width: none;
+  width: auto;
+  min-width: 0;
   border-collapse: separate;
   border-spacing: 0;
-}
-
-${selector} .bases-thead,
-${selector} .bases-tbody {
-  width: max-content;
-  min-width: 100%;
+  table-layout: auto;
 }
 
 ${selector} .bases-td:first-of-type,
@@ -125,7 +121,12 @@ ${selector} table tr th:first-child {
   left: ${config.leftOffsetPx}px;
   background: ${config.backgroundColor};
   z-index: ${config.zIndex};
+  min-width: 120px;
+  max-width: ${config.firstColumnMaxWidthPx}px;
   ${divider}
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 ${selector} .bases-th:first-of-type,
@@ -156,6 +157,7 @@ class HotfixesSettingTab extends PluginSettingTab {
   private backgroundInput: TextComponent | null = null;
   private zIndexInput: TextComponent | null = null;
   private dividerToggleInput: ToggleComponent | null = null;
+  private maxWidthInput: TextComponent | null = null;
 
   constructor(app: App, plugin: ObsidianHotfixesPlugin) {
     super(app, plugin);
@@ -168,6 +170,7 @@ class HotfixesSettingTab extends PluginSettingTab {
     if (this.backgroundInput) this.backgroundInput.setDisabled(!enabled);
     if (this.zIndexInput) this.zIndexInput.setDisabled(!enabled);
     if (this.dividerToggleInput) this.dividerToggleInput.setDisabled(!enabled);
+    if (this.maxWidthInput) this.maxWidthInput.setDisabled(!enabled);
   }
 
   display() {
@@ -241,13 +244,33 @@ class HotfixesSettingTab extends PluginSettingTab {
         )
         .addText((text) => {
           this.backgroundInput = text;
-        text.setValue(state.backgroundColor);
+          text.setValue(state.backgroundColor);
+          text.setDisabled(!state.enabled);
+          text.setPlaceholder("var(--background-primary)");
+          text.onChange(async (value) => {
+            await this.plugin.updateFreezeFirstColumn({
+              backgroundColor:
+                value || DEFAULT_SETTINGS.freezeFirstColumn.backgroundColor,
+            });
+          });
+        });
+
+    new Setting(section)
+      .setName("First-column max width (px)")
+      .setDesc("Cap the sticky first column width to avoid taking too much space.")
+      .addText((text) => {
+        this.maxWidthInput = text;
+        text.setValue(String(state.firstColumnMaxWidthPx));
         text.setDisabled(!state.enabled);
-        text.setPlaceholder("var(--background-primary)");
+        text.inputEl.type = "number";
+        text.setPlaceholder("280");
         text.onChange(async (value) => {
+          const parsed = Number.parseInt(value, 10);
+          if (Number.isNaN(parsed) || parsed < 80) {
+            return;
+          }
           await this.plugin.updateFreezeFirstColumn({
-            backgroundColor:
-              value || DEFAULT_SETTINGS.freezeFirstColumn.backgroundColor,
+            firstColumnMaxWidthPx: parsed,
           });
         });
       });
