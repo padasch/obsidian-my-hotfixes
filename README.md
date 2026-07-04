@@ -4,20 +4,24 @@ Personal utility plugin for small Obsidian quality-of-life fixes.
 
 ## Features
 
-- **Hotfix section: Bases first-column freeze**
-  - Adds a sticky/fixed first column for Bases table views.
+- **Hotfix section: Bases frozen first column**
+  - Adds a custom Bases view named **Frozen Table** with a sticky first column (so horizontal scrolling keeps the first column fixed).
   - Optional fine-tuning for selector, background, offset, z-index, and divider.
 
 ## Settings
 
 All settings are in the plugin settings panel and are arranged as foldable sections, one per hotfix.
 
-- **Enable first-column freeze**: master switch for the Bases fix.
-- **Target selector**: CSS selector that identifies the Bases table container.
-- **Left offset (px)**: optional horizontal offset for the frozen column.
-- **Background**: color for the frozen column.
-- **z-index**: CSS stack order.
-- **Show divider**: draws a divider at the edge of the frozen column.
+- **Enable custom frozen table view**: master switch for this hotfix.
+- **Background**: background for the sticky first column.
+- **First-column width** settings: min/max width and z-index.
+- **Show divider**: adds a divider between the first and second columns.
+
+## Usage
+
+1. Open any Base with `table` data and click the view selector in the toolbar.
+2. Switch to **Frozen Table**.
+3. Enable the hotfix in plugin settings if it is not already on.
 
 ## BRAT setup
 

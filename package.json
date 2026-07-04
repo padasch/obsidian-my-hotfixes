@@ -1,6 +1,6 @@
 {
   "name": "obsidian-my-hotfixes",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "A lightweight Obsidian plugin for personal hotfixes.",
   "main": "main.js",
   "author": "obsidian-hotfixes",
@@ -18,7 +18,7 @@
   "devDependencies": {
     "@types/node": "^22.14.0",
     "esbuild": "^0.25.8",
-    "obsidian": "^1.8.0",
+    "obsidian": "^1.10.0",
     "typescript": "^5.8.3"
   }
 }

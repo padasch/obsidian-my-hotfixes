@@ -1,44 +1,43 @@
 import {
   App,
+  BasesView,
+  HoverParent,
+  HoverPopover,
+  Keymap,
+  PaneType,
   Plugin,
   PluginSettingTab,
+  QueryController,
   Setting,
   TextComponent,
-  ToggleComponent,
+  parsePropertyId,
+  type BasesPropertyId,
 } from "obsidian";
 
-const DEFAULT_FIRST_COLUMN_SELECTOR = ".bases-view[data-view-type='table']";
 const STYLE_ELEMENT_ID = "obsidian-hotfixes-runtime-styles";
+const FROZEN_TABLE_VIEW_TYPE = "obsidian-hotfixes-frozen-table";
 
 interface FreezeFirstColumnHotfixSettings {
   enabled: boolean;
-  selector: string;
-  leftOffsetPx: number;
+  firstColumnMinWidthPx: number;
+  firstColumnMaxWidthPx: number;
   backgroundColor: string;
   zIndex: number;
   showDivider: boolean;
-  firstColumnMaxWidthPx: number;
 }
 
 interface HotfixSettings {
   freezeFirstColumn: FreezeFirstColumnHotfixSettings;
 }
 
-interface TableRowLike {
-  sourceRow: HTMLElement;
-  firstCell: HTMLElement;
-  section: "thead" | "tbody" | "tfoot" | "other";
-}
-
 const DEFAULT_SETTINGS: HotfixSettings = {
   freezeFirstColumn: {
     enabled: false,
-    selector: DEFAULT_FIRST_COLUMN_SELECTOR,
-    leftOffsetPx: 0,
+    firstColumnMinWidthPx: 220,
+    firstColumnMaxWidthPx: 320,
     backgroundColor: "var(--background-primary)",
-    zIndex: 3,
+    zIndex: 4,
     showDivider: true,
-    firstColumnMaxWidthPx: 280,
   },
 };
 
@@ -47,42 +46,33 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     freezeFirstColumn: { ...DEFAULT_SETTINGS.freezeFirstColumn },
   };
   private styleElement: HTMLStyleElement | null = null;
-  private pendingPatchFrame = 0;
-  private mutationObserver: MutationObserver | null = null;
-  private frozenCellElements = new Set<HTMLElement>();
-  private activeOverlays = new Map<HTMLElement, HTMLElement>();
-  private overlayScrollHandlers = new Map<HTMLElement, (event: Event) => void>();
 
   async onload() {
     await this.loadSettings();
     this.applyStyles();
-    this.scheduleBasePatchRefresh();
-
-    this.addSettingTab(new HotfixesSettingTab(this.app, this));
-
-    this.registerEvent(
-      this.app.workspace.on("layout-change", () => this.applyStyles())
-    );
-    this.registerEvent(
-      this.app.workspace.on("active-leaf-change", () => {
-        this.applyStyles();
-        this.scheduleBasePatchRefresh();
-      })
-    );
-    this.registerEvent(
-      this.app.workspace.on("layout-change", () => this.scheduleBasePatchRefresh())
-    );
-
-    this.registerDomEvent(window, "resize", () => this.scheduleBasePatchRefresh());
-
-    this.mutationObserver = new MutationObserver(() =>
-      this.scheduleBasePatchRefresh()
-    );
-    this.mutationObserver.observe(document.body, {
-      childList: true,
-      subtree: true,
+    this.registerSettingTab();
+    const registered = this.registerBasesView(FROZEN_TABLE_VIEW_TYPE, {
+      name: "Frozen Table",
+      icon: "lucide-layout-grid",
+      factory: (controller, containerEl) =>
+        new FrozenTableBasesView(controller, containerEl, this),
     });
-    this.register(() => this.mutationObserver?.disconnect());
+    if (!registered) {
+      console.warn(
+        "[Obsidian Hotfixes] Frozen Table view could not be registered. Bases may be disabled."
+      );
+    }
+
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => this.applyStyles())
+    );
+    this.registerEvent(
+      this.app.workspace.on("layout-change", () => this.refreshOpenFrozenViews())
+    );
+    this.registerEvent(
+      this.app.workspace.on("file-open", () => this.refreshOpenFrozenViews())
+    );
+    this.registerDomEvent(window, "resize", () => this.refreshOpenFrozenViews());
   }
 
   onunload() {
@@ -90,16 +80,14 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       this.styleElement.remove();
       this.styleElement = null;
     }
-    this.clearFrozenColumnOverlays();
-    if (this.pendingPatchFrame) {
-      window.cancelAnimationFrame(this.pendingPatchFrame);
-      this.pendingPatchFrame = 0;
-    }
+  }
+
+  private registerSettingTab() {
+    this.addSettingTab(new HotfixesSettingTab(this.app, this));
   }
 
   async loadSettings() {
     const loaded = await this.loadData();
-
     this.settings.freezeFirstColumn = {
       ...DEFAULT_SETTINGS.freezeFirstColumn,
       ...(loaded?.freezeFirstColumn ?? {}),
@@ -109,7 +97,7 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
     this.applyStyles();
-    this.scheduleBasePatchRefresh();
+    this.refreshOpenFrozenViews();
   }
 
   private applyStyles() {
@@ -119,307 +107,121 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       document.head.appendChild(this.styleElement);
     }
 
-    if (!this.settings.freezeFirstColumn.enabled) {
-      this.styleElement.textContent = "";
-      this.clearFrozenColumnOverlays();
-      return;
-    }
-
     const config = this.settings.freezeFirstColumn;
-    const selector = (config.selector || DEFAULT_FIRST_COLUMN_SELECTOR).trim();
+    const minWidth = Math.max(80, config.firstColumnMinWidthPx);
+    const maxWidth = Math.max(minWidth, config.firstColumnMaxWidthPx);
     const divider = config.showDivider
-      ? "box-shadow: 1px 0 0 var(--background-modifier-border);"
-      : "";
+      ? "1px solid var(--background-modifier-border)"
+      : "none";
 
     this.styleElement.textContent = `
-${selector} {
-  position: relative;
+.obsidian-hotfixes-frozen-bases-view {
+  --obsidian-hotfixes-first-column-min-width: ${minWidth}px;
+  --obsidian-hotfixes-first-column-max-width: ${maxWidth}px;
+  --obsidian-hotfixes-first-column-bg: ${config.backgroundColor};
+  --obsidian-hotfixes-first-column-z: ${config.zIndex};
 }
 
-${selector} .bases-table,
-${selector} .bases-table-container {
-  position: relative;
+.obsidian-hotfixes-frozen-bases-root {
   overflow-x: auto;
-  max-width: 100%;
 }
 
-${selector} .obsidian-hotfixes-first-column-overlay {
-  position: absolute;
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-frozen-bases-view {
+  min-width: max-content;
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--font-ui-smaller);
+  table-layout: auto;
+  max-width: none;
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table thead th {
+  font-weight: 600;
+  background: var(--background-secondary);
+  position: sticky;
   top: 0;
-  left: 0;
-  height: 100%;
-  pointer-events: none;
-  overflow: hidden;
-  z-index: ${config.zIndex};
-  background: ${config.backgroundColor};
-  ${divider}
-  transform: translateX(0px);
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  will-change: transform, width, height;
+  z-index: calc(var(--obsidian-hotfixes-first-column-z, 4) + 1);
 }
 
-${selector} .obsidian-hotfixes-first-column-overlay .obsidian-hotfixes-overlay-row {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: stretch;
-  overflow: hidden;
-  width: 100%;
-}
-
-${selector} .obsidian-hotfixes-overlay-row > .bases-td,
-${selector} .obsidian-hotfixes-overlay-row > .bases-th,
-${selector} .obsidian-hotfixes-overlay-row > td,
-${selector} .obsidian-hotfixes-overlay-row > th,
-${selector} .obsidian-hotfixes-overlay-row > div {
-  width: 100%;
-  min-width: 100%;
-  max-width: 100%;
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th,
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  border-right: 1px solid var(--background-modifier-border);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  vertical-align: top;
 }
 
-${selector} .obsidian-hotfixes-hide-original-first-column {
-  visibility: hidden;
-  pointer-events: none;
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th:first-child,
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table td:first-child {
+  position: sticky;
+  left: 0;
+  min-width: var(--obsidian-hotfixes-first-column-min-width);
+  width: var(--obsidian-hotfixes-first-column-min-width);
+  max-width: var(--obsidian-hotfixes-first-column-max-width);
+  background: var(--obsidian-hotfixes-first-column-bg);
+  z-index: var(--obsidian-hotfixes-first-column-z);
+  border-right: ${divider};
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th:first-child {
+  z-index: calc(var(--obsidian-hotfixes-first-column-z, 4) + 1);
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table thead th:first-child {
+  left: 0;
+}
+
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table thead tr:first-of-type th:last-child {
+  border-right: none;
+}
+
+.obsidian-hotfixes-group-row td {
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-weight: 600;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.obsidian-hotfixes-frozen-bases-empty {
+  color: var(--text-muted);
+  padding: 0.75rem 0.5rem;
+}
+
+.obsidian-hotfixes-setting-section {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.obsidian-hotfixes-setting-section summary {
+  cursor: pointer;
+  font-weight: 600;
+  user-select: none;
+}
+
+.obsidian-hotfixes-setting-section-content {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
 }
 `.trim();
-
-    this.scheduleBasePatchRefresh();
   }
 
-  private scheduleBasePatchRefresh() {
-    if (!this.settings.freezeFirstColumn.enabled) {
-      this.clearFrozenColumnOverlays();
-      return;
-    }
-    if (this.pendingPatchFrame) {
-      return;
-    }
-    this.pendingPatchFrame = window.requestAnimationFrame(() => {
-      this.pendingPatchFrame = 0;
-      this.refreshBasePatches();
+  private refreshOpenFrozenViews() {
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const view = leaf.view;
+      if (view instanceof FrozenTableBasesView) {
+        view.onDataUpdated();
+      }
     });
-  }
-
-  private refreshBasePatches() {
-    this.clearFrozenColumnOverlays();
-
-    if (!this.settings.freezeFirstColumn.enabled) {
-      return;
-    }
-
-    const config = this.settings.freezeFirstColumn;
-    const selector = (config.selector || DEFAULT_FIRST_COLUMN_SELECTOR).trim();
-
-    let roots: NodeListOf<HTMLElement>;
-    try {
-      roots = document.querySelectorAll(selector);
-    } catch {
-      return;
-    }
-
-    roots.forEach((root) => this.patchBaseView(root));
-  }
-
-  private patchBaseView(root: HTMLElement) {
-    const config = this.settings.freezeFirstColumn;
-    const container = this.findHorizontalScrollContainer(root);
-    const rows = this.getTableFirstColumnRows(root);
-
-    if (!rows.length) {
-      return;
-    }
-
-    const referenceColumn = rows.find((row) => row.section === "thead")?.firstCell ?? rows[0].firstCell;
-    const overlayWidth = this.measureFrozenColumnWidth(referenceColumn, rows, config.firstColumnMaxWidthPx);
-
-    for (const rowLike of rows) {
-      const firstCell = rowLike.firstCell;
-      firstCell.classList.add("obsidian-hotfixes-hide-original-first-column");
-      firstCell.style.width = `${overlayWidth}px`;
-      firstCell.style.minWidth = `${Math.max(80, overlayWidth)}px`;
-      firstCell.style.maxWidth = `${overlayWidth}px`;
-      this.frozenCellElements.add(firstCell);
-    }
-
-    const overlay = this.ensureOverlay(container);
-    this.renderOverlayRows(overlay, rows);
-    this.syncOverlayStyles(overlay, container, overlayWidth);
-    this.bindOverlayScrollSync(container, overlay);
-  }
-
-  private getTableFirstColumnRows(root: HTMLElement): TableRowLike[] {
-    const rows = root.querySelectorAll<HTMLElement>("tr, .bases-tr, [role='row']");
-    const rowInfo: TableRowLike[] = [];
-
-    rows.forEach((row) => {
-      const firstCell =
-        row.querySelector<HTMLElement>(
-          ":scope > .bases-td:first-child, :scope > .bases-th:first-child, :scope > td:first-child, :scope > th:first-child"
-        ) ??
-        row.querySelector<HTMLElement>(":scope > *:first-child");
-      if (!firstCell) {
-        return;
-      }
-
-      const parentSection =
-        row.closest(".bases-thead") || row.closest("thead")
-          ? "thead"
-          : row.closest(".bases-tbody") || row.closest("tbody")
-            ? "tbody"
-            : row.closest(".bases-tfoot") || row.closest("tfoot")
-              ? "tfoot"
-              : "other";
-
-      const section = parentSection;
-      rowInfo.push({ sourceRow: row, firstCell, section });
-    });
-
-    return rowInfo;
-  }
-
-  private findHorizontalScrollContainer(root: HTMLElement): HTMLElement {
-    const directCandidates = [
-      root.querySelector<HTMLElement>(".bases-view"),
-      root.querySelector<HTMLElement>(".bases-table"),
-      root.querySelector<HTMLElement>(".bases-table-container"),
-      root.querySelector<HTMLElement>(".bases-viewport"),
-    ];
-
-    for (const candidate of directCandidates) {
-      if (!candidate) {
-        continue;
-      }
-      if (this.isHorizontallyScrollable(candidate)) {
-        return candidate;
-      }
-    }
-
-    return root;
-  }
-
-  private isHorizontallyScrollable(container: HTMLElement): boolean {
-    const style = window.getComputedStyle(container);
-    const overflowX = style.overflowX;
-    const overflow = style.overflow;
-    const canScrollByOverflow =
-      overflowX === "auto" ||
-      overflowX === "scroll" ||
-      overflow === "auto" ||
-      overflow === "scroll";
-
-    return canScrollByOverflow || container.scrollWidth > container.clientWidth + 1;
-  }
-
-  private ensureOverlay(container: HTMLElement): HTMLElement {
-    let overlay = this.activeOverlays.get(container);
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.className = "obsidian-hotfixes-first-column-overlay";
-      container.appendChild(overlay);
-      this.activeOverlays.set(container, overlay);
-    }
-    return overlay;
-  }
-
-  private renderOverlayRows(
-    overlay: HTMLElement,
-    rows: TableRowLike[]
-  ) {
-    const overlayRows: HTMLElement[] = [];
-
-    rows.forEach((rowLike) => {
-      const clonedCell = rowLike.firstCell.cloneNode(true) as HTMLTableCellElement;
-      clonedCell.classList.add("obsidian-hotfixes-overlay-cell");
-      const clonedRow = document.createElement("div");
-      clonedRow.className = `obsidian-hotfixes-overlay-row obsidian-hotfixes-overlay-${rowLike.section}`;
-      clonedRow.style.height = `${Math.max(1, rowLike.sourceRow.getBoundingClientRect().height)}px`;
-      clonedRow.appendChild(clonedCell);
-      overlayRows.push(clonedRow);
-    });
-
-    overlay.replaceChildren();
-    overlay.append(...overlayRows);
-  }
-
-  private syncOverlayStyles(
-    overlay: HTMLElement,
-    container: HTMLElement,
-    width: number
-  ) {
-    const config = this.settings.freezeFirstColumn;
-    overlay.style.width = `${width}px`;
-    overlay.style.left = `${config.leftOffsetPx}px`;
-    overlay.style.height = `${Math.max(1, Math.ceil(container.scrollHeight))}px`;
-    this.syncOverlayScroll(container, overlay);
-  }
-
-  private measureFrozenColumnWidth(
-    referenceColumn: HTMLElement,
-    rows: TableRowLike[],
-    maxWidth: number
-  ): number {
-    const candidateWidth = this.measureElementWidth(referenceColumn);
-    const fallbackWidth = rows.reduce<number>((acc, rowLike) => {
-      const rowWidth = this.measureElementWidth(rowLike.firstCell);
-      return Math.max(acc, rowWidth);
-    }, 0);
-
-    const resolved = candidateWidth || fallbackWidth;
-    return Math.min(maxWidth, Math.max(80, resolved));
-  }
-
-  private measureElementWidth(cell: HTMLElement): number {
-    const style = window.getComputedStyle(cell);
-    const explicitWidth = Number.parseFloat(style.width);
-    if (Number.isFinite(explicitWidth) && explicitWidth > 0) {
-      return Math.ceil(explicitWidth);
-    }
-    const rectWidth = Math.ceil(cell.getBoundingClientRect().width);
-    if (Number.isFinite(rectWidth) && rectWidth > 0) {
-      return rectWidth;
-    }
-    return Math.ceil(cell.offsetWidth);
-  }
-
-  private bindOverlayScrollSync(
-    container: HTMLElement,
-    overlay: HTMLElement
-  ) {
-    if (this.overlayScrollHandlers.has(container)) {
-      return;
-    }
-
-    const handler = () => this.syncOverlayScroll(container, overlay);
-    container.addEventListener("scroll", handler, { passive: true });
-    this.overlayScrollHandlers.set(container, handler);
-  }
-
-  private syncOverlayScroll(container: HTMLElement, overlay: HTMLElement) {
-    overlay.style.transform = `translateX(${container.scrollLeft}px)`;
-  }
-
-  private clearFrozenColumnOverlays() {
-    for (const cell of this.frozenCellElements) {
-      cell.classList.remove("obsidian-hotfixes-hide-original-first-column");
-      cell.style.width = "";
-      cell.style.minWidth = "";
-      cell.style.maxWidth = "";
-    }
-    this.frozenCellElements.clear();
-
-    for (const [container, overlay] of this.activeOverlays) {
-      overlay.remove();
-      const handler = this.overlayScrollHandlers.get(container);
-      if (handler) {
-        container.removeEventListener("scroll", handler);
-      }
-    }
-    this.activeOverlays.clear();
-    this.overlayScrollHandlers.clear();
   }
 
   async updateFreezeFirstColumn(
@@ -433,27 +235,159 @@ ${selector} .obsidian-hotfixes-hide-original-first-column {
   }
 }
 
+class FrozenTableBasesView extends BasesView implements HoverParent {
+  hoverPopover: HoverPopover | null = null;
+  private readonly root: HTMLDivElement;
+
+  constructor(
+    controller: QueryController,
+    containerEl: HTMLElement,
+    private plugin: ObsidianHotfixesPlugin
+  ) {
+    super(controller);
+    this.root = containerEl.createDiv("obsidian-hotfixes-frozen-bases-root");
+  }
+
+  readonly type = FROZEN_TABLE_VIEW_TYPE;
+
+  public onDataUpdated(): void {
+    this.render();
+  }
+
+  private render() {
+    this.root.empty();
+
+    if (!this.plugin.settings.freezeFirstColumn.enabled) {
+      this.root.createDiv({
+        cls: "obsidian-hotfixes-frozen-bases-empty",
+        text: "Frozen table view is disabled. Turn it on in plugin settings.",
+      });
+      return;
+    }
+
+    const propertyOrder = this.getPropertyOrder();
+    if (!propertyOrder.length) {
+      this.root.createDiv({
+        cls: "obsidian-hotfixes-frozen-bases-empty",
+        text: "No properties available for this Base.",
+      });
+      return;
+    }
+
+    const view = this.root.createDiv("obsidian-hotfixes-frozen-bases-view");
+    const table = view.createEl("table", { cls: "obsidian-hotfixes-table" });
+    const thead = table.createTHead();
+    const headerRow = thead.createEl("tr");
+
+    for (const propertyId of propertyOrder) {
+      const name = this.config.getDisplayName(propertyId);
+      headerRow.createEl("th", {
+        text: name,
+      });
+    }
+
+    const tbody = table.createTBody();
+    const hasVisibleGrouping = this.data.groupedData.length > 1;
+
+    for (const group of this.data.groupedData) {
+      const entries = group.entries;
+      if (!entries.length) {
+        continue;
+      }
+
+      if (hasVisibleGrouping) {
+        const groupRow = tbody.createEl("tr", { cls: "obsidian-hotfixes-group-row" });
+        const keyValue = group.key?.toString() ?? "Ungrouped";
+        const groupCell = groupRow.createEl("td", {
+          text: keyValue,
+        });
+        groupCell.colSpan = propertyOrder.length;
+      }
+
+      for (const entry of entries) {
+        const row = tbody.createEl("tr");
+        for (const propertyId of propertyOrder) {
+          const cell = row.createEl("td");
+          const parsed = parsePropertyId(propertyId);
+
+          if (parsed.type === "file" && parsed.name === "name") {
+            const link = cell.createEl("a", {
+              text: entry.file.name,
+              href: entry.file.path,
+            });
+            link.addClass("internal-link");
+            link.addEventListener("click", (event) => {
+              if (event.button !== 0 && event.button !== 1) {
+                return;
+              }
+
+              const pane = Keymap.isModEvent(event);
+              event.preventDefault();
+
+              if (pane === true || pane === false) {
+                void this.plugin.app.workspace.openLinkText(
+                  entry.file.path,
+                  "",
+                  Boolean(pane)
+                );
+                return;
+              }
+
+              void this.plugin.app.workspace.openLinkText(
+                entry.file.path,
+                "",
+                pane as PaneType
+              );
+            });
+            link.addEventListener("mouseover", (event) => {
+              this.plugin.app.workspace.trigger("hover-link", {
+                event,
+                source: "bases",
+                hoverParent: this,
+                targetEl: link,
+                linktext: entry.file.path,
+              });
+            });
+            continue;
+          }
+
+          const value = entry.getValue(propertyId);
+          const textValue = value ? value.toString() : "";
+          cell.createSpan({ text: textValue });
+          if (textValue) {
+            cell.title = textValue;
+          }
+        }
+      }
+    }
+  }
+
+  private getPropertyOrder(): BasesPropertyId[] {
+    const explicitOrder = this.config.getOrder();
+    if (explicitOrder.length > 0) {
+      return explicitOrder;
+    }
+    return this.data.properties;
+  }
+}
+
 class HotfixesSettingTab extends PluginSettingTab {
   plugin: ObsidianHotfixesPlugin;
-  private selectorInput: TextComponent | null = null;
-  private leftOffsetInput: TextComponent | null = null;
+  private minWidthInput: TextComponent | null = null;
+  private maxWidthInput: TextComponent | null = null;
   private backgroundInput: TextComponent | null = null;
   private zIndexInput: TextComponent | null = null;
-  private dividerToggleInput: ToggleComponent | null = null;
-  private maxWidthInput: TextComponent | null = null;
 
   constructor(app: App, plugin: ObsidianHotfixesPlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
 
-  private setHotfixEnabled(enabled: boolean) {
-    if (this.selectorInput) this.selectorInput.setDisabled(!enabled);
-    if (this.leftOffsetInput) this.leftOffsetInput.setDisabled(!enabled);
+  private setSectionEnabled(enabled: boolean) {
+    if (this.minWidthInput) this.minWidthInput.setDisabled(!enabled);
+    if (this.maxWidthInput) this.maxWidthInput.setDisabled(!enabled);
     if (this.backgroundInput) this.backgroundInput.setDisabled(!enabled);
     if (this.zIndexInput) this.zIndexInput.setDisabled(!enabled);
-    if (this.dividerToggleInput) this.dividerToggleInput.setDisabled(!enabled);
-    if (this.maxWidthInput) this.maxWidthInput.setDisabled(!enabled);
   }
 
   display() {
@@ -465,7 +399,7 @@ class HotfixesSettingTab extends PluginSettingTab {
       cls: "obsidian-hotfixes-setting-section",
     });
     details.createEl("summary", {
-      text: "Bases: Freeze first column",
+      text: "Bases: Frozen first column",
     });
     const section = details.createEl("div", {
       cls: "obsidian-hotfixes-setting-section-content",
@@ -474,79 +408,45 @@ class HotfixesSettingTab extends PluginSettingTab {
     const state = this.plugin.settings.freezeFirstColumn;
 
     new Setting(section)
-      .setName("Enable first-column freeze")
+      .setName("Enable custom frozen table view")
       .setDesc(
-        "Keep the first column in Bases table view visible while scrolling horizontally."
+        "Use a custom Bases view with a sticky first column instead of overlay hacks."
       )
       .addToggle((toggle) => {
         toggle.setValue(state.enabled);
         toggle.onChange(async (value) => {
           await this.plugin.updateFreezeFirstColumn({ enabled: value });
-          this.setHotfixEnabled(value);
+          this.setSectionEnabled(value);
         });
       });
 
     new Setting(section)
-      .setName("Target selector")
-      .setDesc(
-        "CSS selector for the Bases container. Default targets table view-only Bases."
-      )
+      .setName("First column minimum width (px)")
+      .setDesc("Minimum width of the frozen first column.")
       .addText((text) => {
-        this.selectorInput = text;
-        text.setValue(state.selector);
-        text.setDisabled(!state.enabled);
-        text.onChange(async (value) => {
-          await this.plugin.updateFreezeFirstColumn({
-            selector: value || DEFAULT_FIRST_COLUMN_SELECTOR,
-          });
-        });
-      });
-
-    new Setting(section)
-      .setName("Left offset (px)")
-      .setDesc("Optional offset for the frozen column from the left edge.")
-      .addText((text) => {
-        this.leftOffsetInput = text;
-        text.setValue(String(state.leftOffsetPx));
+        this.minWidthInput = text;
+        text.setValue(String(state.firstColumnMinWidthPx));
         text.setDisabled(!state.enabled);
         text.inputEl.type = "number";
-        text.setPlaceholder("0");
         text.onChange(async (value) => {
           const parsed = Number.parseInt(value, 10);
-          if (Number.isNaN(parsed)) {
+          if (Number.isNaN(parsed) || parsed < 80) {
             return;
           }
-          await this.plugin.updateFreezeFirstColumn({ leftOffsetPx: parsed });
-        });
-      });
-
-    new Setting(section)
-      .setName("Background")
-      .setDesc(
-        "Background for the fixed first column while scrolling (CSS color or variable)."
-      )
-      .addText((text) => {
-        this.backgroundInput = text;
-        text.setValue(state.backgroundColor);
-        text.setDisabled(!state.enabled);
-        text.setPlaceholder("var(--background-primary)");
-        text.onChange(async (value) => {
           await this.plugin.updateFreezeFirstColumn({
-            backgroundColor:
-              value || DEFAULT_SETTINGS.freezeFirstColumn.backgroundColor,
+            firstColumnMinWidthPx: parsed,
           });
         });
       });
 
     new Setting(section)
-      .setName("First-column max width (px)")
-      .setDesc("Cap the frozen first-column width to avoid taking too much space.")
+      .setName("First column max width (px)")
+      .setDesc("Cap the frozen first column width.")
       .addText((text) => {
         this.maxWidthInput = text;
         text.setValue(String(state.firstColumnMaxWidthPx));
         text.setDisabled(!state.enabled);
         text.inputEl.type = "number";
-        text.setPlaceholder("280");
         text.onChange(async (value) => {
           const parsed = Number.parseInt(value, 10);
           if (Number.isNaN(parsed) || parsed < 80) {
@@ -559,14 +459,29 @@ class HotfixesSettingTab extends PluginSettingTab {
       });
 
     new Setting(section)
+      .setName("Background")
+      .setDesc("Background used behind the frozen first column.")
+      .addText((text) => {
+        this.backgroundInput = text;
+        text.setValue(state.backgroundColor);
+        text.setDisabled(!state.enabled);
+        text.setPlaceholder("var(--background-primary)");
+        text.onChange(async (value) => {
+          await this.plugin.updateFreezeFirstColumn({
+            backgroundColor: value || DEFAULT_SETTINGS.freezeFirstColumn.backgroundColor,
+          });
+        });
+      });
+
+    new Setting(section)
       .setName("z-index")
-      .setDesc("z-index value used for frozen first-column overlay.")
+      .setDesc("Stacking order for the frozen first column.")
       .addText((text) => {
         this.zIndexInput = text;
         text.setValue(String(state.zIndex));
         text.setDisabled(!state.enabled);
         text.inputEl.type = "number";
-        text.setPlaceholder("3");
+        text.setPlaceholder("4");
         text.onChange(async (value) => {
           const parsed = Number.parseInt(value, 10);
           if (Number.isNaN(parsed)) {
@@ -578,11 +493,8 @@ class HotfixesSettingTab extends PluginSettingTab {
 
     new Setting(section)
       .setName("Show divider")
-      .setDesc(
-        "Draw a thin divider line to the right of the frozen first column."
-      )
+      .setDesc("Draw a divider to the right of the frozen first column.")
       .addToggle((toggle) => {
-        this.dividerToggleInput = toggle;
         toggle.setValue(state.showDivider);
         toggle.setDisabled(!state.enabled);
         toggle.onChange(async (value) => {
@@ -590,6 +502,6 @@ class HotfixesSettingTab extends PluginSettingTab {
         });
       });
 
-    this.setHotfixEnabled(state.enabled);
+    this.setSectionEnabled(state.enabled);
   }
 }
