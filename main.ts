@@ -480,6 +480,10 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   border-top: 1px solid var(--background-modifier-border);
 }
 
+.obsidian-hotfixes-table tbody tr.obsidian-hotfixes-data-row:hover td {
+  background: var(--background-modifier-hover);
+}
+
 .obsidian-hotfixes-note-cell {
   cursor: text;
 }
@@ -1310,7 +1314,7 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
       }
 
       for (const entry of entries) {
-        const row = tbody.createEl("tr");
+        const row = tbody.createEl("tr", { cls: "obsidian-hotfixes-data-row" });
         for (let index = 0; index < propertyOrder.length; index++) {
           const propertyId = propertyOrder[index];
           const propertyKey = this.getPropertyId(propertyId);
