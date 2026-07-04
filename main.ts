@@ -13,6 +13,7 @@ import {
   MarkdownRenderer,
   QueryController,
   Setting,
+  SliderComponent,
   TextComponent,
   UrlValue,
   parsePropertyId,
@@ -31,6 +32,7 @@ const FROZEN_TABLE_REORDER_FEATURE_KEY = "obsidian-hotfixes:view-feature-reorder
 const FROZEN_TABLE_LINKS_FEATURE_KEY = "obsidian-hotfixes:view-feature-preserve-links";
 const FROZEN_TABLE_EDIT_FEATURE_KEY = "obsidian-hotfixes:view-feature-edit-notes";
 const FROZEN_TABLE_WRAP_MODE_FEATURE_KEY = "obsidian-hotfixes:view-feature-wrap-mode";
+const FROZEN_TABLE_TRUNCATE_FEATURE_KEY = "obsidian-hotfixes:view-feature-truncate";
 
 type FrozenTableWrapMode = "narrow" | "wide";
 
@@ -70,6 +72,16 @@ function getStringFeatureValue(
 function getFrozenTableViewFeatures(
   config: Pick<BasesViewConfig, "get">
 ): FrozenTableViewFeatures {
+  const legacyWrapMode = getStringFeatureValue(
+    config.get(FROZEN_TABLE_WRAP_MODE_FEATURE_KEY),
+    ["narrow", "wide"],
+    DEFAULT_FROZEN_TABLE_FEATURES.wrapMode
+  );
+  const truncateByToggle = getBooleanFeatureValue(
+    config.get(FROZEN_TABLE_TRUNCATE_FEATURE_KEY),
+    legacyWrapMode === "narrow"
+  );
+
   return {
     enableResize: getBooleanFeatureValue(
       config.get(FROZEN_TABLE_RESIZE_FEATURE_KEY),
@@ -87,11 +99,7 @@ function getFrozenTableViewFeatures(
       config.get(FROZEN_TABLE_EDIT_FEATURE_KEY),
       DEFAULT_FROZEN_TABLE_FEATURES.editableNotes
     ),
-    wrapMode: getStringFeatureValue(
-      config.get(FROZEN_TABLE_WRAP_MODE_FEATURE_KEY),
-      ["narrow", "wide"],
-      DEFAULT_FROZEN_TABLE_FEATURES.wrapMode
-    ) as FrozenTableWrapMode,
+    wrapMode: truncateByToggle ? "narrow" : "wide",
   };
 }
 
@@ -99,6 +107,7 @@ interface FreezeFirstColumnHotfixSettings {
   enabled: boolean;
   firstColumnMinWidthPx: number;
   firstColumnMaxWidthPx: number;
+  cellHeightPx: number;
   backgroundColor: string;
   zIndex: number;
   showDivider: boolean;
@@ -113,6 +122,7 @@ const DEFAULT_SETTINGS: HotfixSettings = {
     enabled: false,
     firstColumnMinWidthPx: 220,
     firstColumnMaxWidthPx: 320,
+    cellHeightPx: 34,
     backgroundColor: "var(--background-primary)",
     zIndex: 4,
     showDivider: true,
@@ -166,14 +176,10 @@ export default class ObsidianHotfixesPlugin extends Plugin {
                 default: featureSettings.editableNotes,
               },
               {
-                type: "dropdown",
-                key: FROZEN_TABLE_WRAP_MODE_FEATURE_KEY,
-                displayName: "Cell wrapping",
-                default: featureSettings.wrapMode,
-                options: {
-                  narrow: "Narrow (truncate)",
-                  wide: "Large (wrap)",
-                },
+                type: "toggle",
+                key: FROZEN_TABLE_TRUNCATE_FEATURE_KEY,
+                displayName: "Truncate long text",
+                default: featureSettings.wrapMode === "narrow",
               },
             ],
           },
@@ -240,11 +246,13 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     const divider = config.showDivider
       ? "1px solid var(--background-modifier-border)"
       : "none";
+    const cellHeight = Math.max(18, Math.min(96, config.cellHeightPx));
 
     this.styleElement.textContent = `
 .obsidian-hotfixes-frozen-bases-view {
   --obsidian-hotfixes-first-column-min-width: ${minWidth}px;
   --obsidian-hotfixes-first-column-max-width: ${maxWidth}px;
+  --obsidian-hotfixes-cell-height: ${cellHeight}px;
   --obsidian-hotfixes-first-column-bg: ${config.backgroundColor};
   --obsidian-hotfixes-first-column-z: ${config.zIndex};
 }
@@ -281,10 +289,13 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   border-bottom: 1px solid var(--background-modifier-border);
   border-right: 1px solid var(--background-modifier-border);
   vertical-align: top;
+  box-sizing: border-box;
+  min-height: var(--obsidian-hotfixes-cell-height);
 }
 
 .obsidian-hotfixes-wrap-narrow .obsidian-hotfixes-table th,
 .obsidian-hotfixes-wrap-narrow .obsidian-hotfixes-table td {
+  height: var(--obsidian-hotfixes-cell-height);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -766,11 +777,77 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
       return false;
     }
 
+    if (/^\[[^\]]+\]\([^\)]*\)$/u.test(normalized)) {
+      return true;
+    }
+
+    if (this.isLikelyUri(normalized)) {
+      return true;
+    }
+
     if (/\[\[[^\]]+\]\]/.test(normalized)) {
       return true;
     }
 
     return /(?:https?:\/\/|www\.)[^\s<>"'()]+/i.test(normalized);
+  }
+
+  private isLikelyUri(value: string): boolean {
+    return /^[a-z][a-z0-9+.-]*:[^\s<>'"()]+$/i.test(value);
+  }
+
+  private renderUriLink(
+    container: HTMLElement,
+    href: string,
+    label: string
+  ) {
+    container.empty();
+    const link = container.createEl("a", {
+      text: label,
+      href,
+    });
+    link.addClass("external-link");
+
+    link.addEventListener("click", (event) => {
+      if (event.button !== 0 && event.button !== 1) {
+        return;
+      }
+
+      event.preventDefault();
+      window.open(href, "_blank", "noopener,noreferrer");
+    });
+
+    link.addEventListener("mouseover", (event) => {
+      this.plugin.app.workspace.trigger("hover-link", {
+        event,
+        source: "bases",
+        hoverParent: this,
+        targetEl: link,
+        linktext: href,
+      });
+    });
+
+    return;
+  }
+
+  private renderMarkdownLink(container: HTMLElement, value: string): boolean {
+    const match = /^\[(?<label>[^\]]+)\]\((?<href>[^\)]*?)\)$/u.exec(
+      value.trim()
+    );
+    if (!match || !match.groups) {
+      return false;
+    }
+
+    const href = (match.groups["href"] ?? "")
+      .trim()
+      .replace(/\s+["'][^"']*["']$/, "");
+    const label = match.groups["label"]?.trim() || href;
+    if (!href || !label || !this.isLikelyUri(href)) {
+      return false;
+    }
+
+    this.renderUriLink(container, href, label);
+    return true;
   }
 
   private renderCellValue(
@@ -831,6 +908,14 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
     if (value && featureSettings.preserveLinks) {
       const content = cell.createSpan();
       const sourcePath = entry?.file?.path ?? "";
+      if (this.renderMarkdownLink(content, textValue)) {
+        return;
+      }
+
+      if (this.isLikelyUri(textValue)) {
+        this.renderUriLink(content, textValue, textValue);
+        return;
+      }
       const renderedAsLinkFriendly = this.renderLinkFriendlyCell(
         content,
         value,
@@ -1156,6 +1241,7 @@ class HotfixesSettingTab extends PluginSettingTab {
   plugin: ObsidianHotfixesPlugin;
   private minWidthInput: TextComponent | null = null;
   private maxWidthInput: TextComponent | null = null;
+  private cellHeightSlider: SliderComponent | null = null;
   private backgroundInput: TextComponent | null = null;
   private zIndexInput: TextComponent | null = null;
 
@@ -1167,6 +1253,7 @@ class HotfixesSettingTab extends PluginSettingTab {
   private setSectionEnabled(enabled: boolean) {
     if (this.minWidthInput) this.minWidthInput.setDisabled(!enabled);
     if (this.maxWidthInput) this.maxWidthInput.setDisabled(!enabled);
+    if (this.cellHeightSlider) this.cellHeightSlider.setDisabled(!enabled);
     if (this.backgroundInput) this.backgroundInput.setDisabled(!enabled);
     if (this.zIndexInput) this.zIndexInput.setDisabled(!enabled);
   }
@@ -1235,6 +1322,23 @@ class HotfixesSettingTab extends PluginSettingTab {
           }
           await this.plugin.updateFreezeFirstColumn({
             firstColumnMaxWidthPx: parsed,
+          });
+        });
+      });
+
+    new Setting(section)
+      .setName("Cell height (px)")
+      .setDesc("Control row height / vertical spacing in the frozen table.")
+      .addSlider((slider) => {
+        this.cellHeightSlider = slider;
+        slider
+          .setLimits(18, 96, 1)
+          .setValue(state.cellHeightPx)
+          .setDynamicTooltip();
+        slider.setDisabled(!state.enabled);
+        slider.onChange(async (value) => {
+          await this.plugin.updateFreezeFirstColumn({
+            cellHeightPx: Math.round(value),
           });
         });
       });
