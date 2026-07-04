@@ -196,6 +196,18 @@ interface BaseViewSwitcherTarget {
   baseFile: TFile;
 }
 
+interface BaseControllerLike {
+  viewName?: string;
+  getQueryViewNames?: () => string[];
+  selectView?: (viewName: string) => void;
+}
+
+interface OwningFileView {
+  containerEl: HTMLElement;
+  file: TFile | null;
+  view: unknown;
+}
+
 export default class ObsidianHotfixesPlugin extends Plugin {
   settings: HotfixSettings = {
     freezeFirstColumn: { ...DEFAULT_SETTINGS.freezeFirstColumn },
@@ -728,11 +740,8 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     return targets;
   }
 
-  private getOwningFileView(element: HTMLElement): {
-    containerEl: HTMLElement;
-    file: TFile | null;
-  } | null {
-    let owner: { containerEl: HTMLElement; file: TFile | null } | null = null;
+  private getOwningFileView(element: HTMLElement): OwningFileView | null {
+    let owner: OwningFileView | null = null;
 
     this.app.workspace.iterateAllLeaves((leaf) => {
       if (owner) {
@@ -748,6 +757,7 @@ export default class ObsidianHotfixesPlugin extends Plugin {
         owner = {
           containerEl: view.containerEl,
           file: view.file instanceof TFile ? view.file : null,
+          view: leaf.view,
         };
       }
     });
@@ -829,6 +839,10 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     viewNames: string[] = []
   ): HTMLElement | null {
     const preferredSelectors = [
+      ".bases-toolbar-item.bases-toolbar-views-menu .text-icon-button",
+      ".bases-toolbar-views-menu .text-icon-button",
+      ".bases-toolbar-item.bases-toolbar-views-menu",
+      ".bases-toolbar-views-menu",
       ".bases-toolbar-view-menu",
       ".bases-toolbar-item.mod-view",
       ".bases-toolbar-item.mod-view-menu",
@@ -917,8 +931,11 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       target.headerEl,
       views.map((view) => view.name)
     );
+    const controller = this.getBaseControllerForHeader(target.headerEl);
     const activeViewName = this.findActiveBaseViewName(
-      nativeViewButton
+      typeof controller?.viewName === "string"
+        ? controller.viewName
+        : nativeViewButton
         ? this.normalizeText(
             nativeViewButton.innerText || nativeViewButton.textContent || ""
           )
@@ -1034,6 +1051,13 @@ export default class ObsidianHotfixesPlugin extends Plugin {
           )
         ).map((button) => button.dataset.viewName ?? button.textContent ?? "")
       : [];
+    const controller = this.getBaseControllerForHeader(headerEl);
+    if (controller?.selectView && controller.getQueryViewNames?.().includes(viewName)) {
+      controller.selectView(viewName);
+      window.setTimeout(() => this.scheduleBaseViewSwitcherRefresh(), 80);
+      return;
+    }
+
     const nativeViewButton = this.findNativeBaseViewButton(headerEl, viewNames);
     if (!nativeViewButton) {
       console.warn(
@@ -1044,7 +1068,9 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 
     const menuItemsBefore = new Set(
       Array.from(
-        document.querySelectorAll<HTMLElement>(".menu-item, [role='menuitem']")
+        document.querySelectorAll<HTMLElement>(
+          ".bases-toolbar-menu-item, .menu-item, [role='menuitem']"
+        )
       )
     );
 
@@ -1054,7 +1080,9 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     const candidates = newMenuItems.length > 0
       ? newMenuItems
       : Array.from(
-          document.querySelectorAll<HTMLElement>(".menu-item, [role='menuitem']")
+          document.querySelectorAll<HTMLElement>(
+            ".bases-toolbar-menu-item, .menu-item, [role='menuitem']"
+          )
         );
     const targetItem = this.findMenuItemForView(candidates, viewName);
 
@@ -1075,16 +1103,19 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     viewName: string
   ): HTMLElement | null {
     const normalizedViewName = this.normalizeText(viewName);
-    const exact = menuItems.find((item) =>
-      this.normalizeText(item.innerText || item.textContent || "") ===
-      normalizedViewName
+    const viewMenuItems = menuItems.filter((item) =>
+      item.closest('[data-group="views"]') !== null
+    );
+    const candidates = viewMenuItems.length > 0 ? viewMenuItems : menuItems;
+    const exact = candidates.find((item) =>
+      this.normalizeMenuItemText(item) === normalizedViewName
     );
     if (exact) {
       return exact;
     }
 
-    return menuItems.find((item) => {
-      const rawText = item.innerText || item.textContent || "";
+    return candidates.find((item) => {
+      const rawText = this.normalizeMenuItemText(item);
       const firstLine = rawText.split(/\r?\n/u)[0] ?? "";
       return this.normalizeText(firstLine) === normalizedViewName;
     }) ?? null;
@@ -1092,6 +1123,34 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 
   private normalizeText(value: string): string {
     return value.replace(/\s+/g, " ").trim();
+  }
+
+  private normalizeMenuItemText(item: HTMLElement): string {
+    const nameEl = item.querySelector<HTMLElement>(".bases-toolbar-menu-item-name");
+    return this.normalizeText(
+      nameEl?.innerText ||
+        nameEl?.textContent ||
+        item.innerText ||
+        item.textContent ||
+        ""
+    );
+  }
+
+  private getBaseControllerForHeader(
+    headerEl: HTMLElement
+  ): BaseControllerLike | null {
+    const owner = this.getOwningFileView(headerEl);
+    const view = owner?.view as { controller?: unknown } | null | undefined;
+    const controller = view?.controller as BaseControllerLike | undefined;
+    if (
+      controller &&
+      typeof controller.selectView === "function" &&
+      typeof controller.getQueryViewNames === "function"
+    ) {
+      return controller;
+    }
+
+    return null;
   }
 
   private isVisibleElement(element: HTMLElement): boolean {
@@ -1153,7 +1212,9 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     while (Date.now() < deadline) {
       await this.nextAnimationFrame();
       const menuItems = Array.from(
-        document.querySelectorAll<HTMLElement>(".menu-item, [role='menuitem']")
+        document.querySelectorAll<HTMLElement>(
+          ".bases-toolbar-menu-item, .menu-item, [role='menuitem']"
+        )
       ).filter(
         (item) =>
           item.isConnected &&
