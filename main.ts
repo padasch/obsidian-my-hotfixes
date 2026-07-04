@@ -13,7 +13,6 @@ import {
   MarkdownRenderer,
   QueryController,
   Setting,
-  SliderComponent,
   TextComponent,
   UrlValue,
   parsePropertyId,
@@ -33,6 +32,9 @@ const FROZEN_TABLE_LINKS_FEATURE_KEY = "obsidian-hotfixes:view-feature-preserve-
 const FROZEN_TABLE_EDIT_FEATURE_KEY = "obsidian-hotfixes:view-feature-edit-notes";
 const FROZEN_TABLE_WRAP_MODE_FEATURE_KEY = "obsidian-hotfixes:view-feature-wrap-mode";
 const FROZEN_TABLE_TRUNCATE_FEATURE_KEY = "obsidian-hotfixes:view-feature-truncate";
+const FROZEN_TABLE_CELL_HEIGHT_FEATURE_KEY = "obsidian-hotfixes:view-feature-cell-height";
+
+const DEFAULT_CELL_HEIGHT_PX = 34;
 
 type FrozenTableWrapMode = "narrow" | "wide";
 
@@ -42,6 +44,7 @@ interface FrozenTableViewFeatures {
   preserveLinks: boolean;
   editableNotes: boolean;
   wrapMode: FrozenTableWrapMode;
+  cellHeightPx: number;
 }
 
 const DEFAULT_FROZEN_TABLE_FEATURES: FrozenTableViewFeatures = {
@@ -50,6 +53,7 @@ const DEFAULT_FROZEN_TABLE_FEATURES: FrozenTableViewFeatures = {
   preserveLinks: true,
   editableNotes: false,
   wrapMode: "narrow",
+  cellHeightPx: DEFAULT_CELL_HEIGHT_PX,
 };
 
 function getBooleanFeatureValue(
@@ -67,6 +71,41 @@ function getStringFeatureValue(
   return typeof value === "string" && allowed.includes(value)
     ? value
     : fallback;
+}
+
+function getNumberFeatureValue(value: unknown, fallback: number): number {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "value" in value &&
+    typeof (value as { value?: unknown }).value === "number"
+  ) {
+    const nestedValue = (value as { value: number }).value;
+    return Number.isFinite(nestedValue) ? nestedValue : fallback;
+  }
+
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "value" in value &&
+    typeof (value as { value?: unknown }).value === "string"
+  ) {
+    const nestedParsed = Number.parseFloat(
+      (value as { value: string }).value
+    );
+    return Number.isFinite(nestedParsed) ? nestedParsed : fallback;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  return fallback;
 }
 
 function getFrozenTableViewFeatures(
@@ -100,6 +139,10 @@ function getFrozenTableViewFeatures(
       DEFAULT_FROZEN_TABLE_FEATURES.editableNotes
     ),
     wrapMode: truncateByToggle ? "narrow" : "wide",
+    cellHeightPx: getNumberFeatureValue(
+      config.get(FROZEN_TABLE_CELL_HEIGHT_FEATURE_KEY),
+      DEFAULT_FROZEN_TABLE_FEATURES.cellHeightPx
+    ),
   };
 }
 
@@ -107,7 +150,6 @@ interface FreezeFirstColumnHotfixSettings {
   enabled: boolean;
   firstColumnMinWidthPx: number;
   firstColumnMaxWidthPx: number;
-  cellHeightPx: number;
   backgroundColor: string;
   zIndex: number;
   showDivider: boolean;
@@ -122,7 +164,6 @@ const DEFAULT_SETTINGS: HotfixSettings = {
     enabled: false,
     firstColumnMinWidthPx: 220,
     firstColumnMaxWidthPx: 320,
-    cellHeightPx: 34,
     backgroundColor: "var(--background-primary)",
     zIndex: 4,
     showDivider: true,
@@ -180,6 +221,17 @@ export default class ObsidianHotfixesPlugin extends Plugin {
                 key: FROZEN_TABLE_TRUNCATE_FEATURE_KEY,
                 displayName: "Truncate long text",
                 default: featureSettings.wrapMode === "narrow",
+              },
+              {
+                type: "slider",
+                key: FROZEN_TABLE_CELL_HEIGHT_FEATURE_KEY,
+                displayName: "Cell height (px)",
+                default: featureSettings.cellHeightPx,
+                instant: true,
+                min: 18,
+                max: 96,
+                step: 1,
+                displayFormat: (value) => `${value}px`,
               },
             ],
           },
@@ -246,13 +298,12 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     const divider = config.showDivider
       ? "1px solid var(--background-modifier-border)"
       : "none";
-    const cellHeight = Math.max(18, Math.min(96, config.cellHeightPx));
 
     this.styleElement.textContent = `
-.obsidian-hotfixes-frozen-bases-view {
+.obsidian-hotfixes-frozen-bases-root {
   --obsidian-hotfixes-first-column-min-width: ${minWidth}px;
   --obsidian-hotfixes-first-column-max-width: ${maxWidth}px;
-  --obsidian-hotfixes-cell-height: ${cellHeight}px;
+  --obsidian-hotfixes-cell-height: ${DEFAULT_CELL_HEIGHT_PX}px;
   --obsidian-hotfixes-first-column-bg: ${config.backgroundColor};
   --obsidian-hotfixes-first-column-z: ${config.zIndex};
 }
@@ -592,7 +643,15 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
     }
 
     const features = getFrozenTableViewFeatures(this.config);
+    const cellHeight = Math.max(
+      18,
+      Math.min(96, Math.round(features.cellHeightPx))
+    );
     this.root.className = `obsidian-hotfixes-frozen-bases-root obsidian-hotfixes-wrap-${features.wrapMode}`;
+    this.root.style.setProperty(
+      "--obsidian-hotfixes-cell-height",
+      `${cellHeight}px`
+    );
 
     this.currentPropertyOrder = [];
     this.columnElements.clear();
@@ -1241,7 +1300,6 @@ class HotfixesSettingTab extends PluginSettingTab {
   plugin: ObsidianHotfixesPlugin;
   private minWidthInput: TextComponent | null = null;
   private maxWidthInput: TextComponent | null = null;
-  private cellHeightSlider: SliderComponent | null = null;
   private backgroundInput: TextComponent | null = null;
   private zIndexInput: TextComponent | null = null;
 
@@ -1253,7 +1311,6 @@ class HotfixesSettingTab extends PluginSettingTab {
   private setSectionEnabled(enabled: boolean) {
     if (this.minWidthInput) this.minWidthInput.setDisabled(!enabled);
     if (this.maxWidthInput) this.maxWidthInput.setDisabled(!enabled);
-    if (this.cellHeightSlider) this.cellHeightSlider.setDisabled(!enabled);
     if (this.backgroundInput) this.backgroundInput.setDisabled(!enabled);
     if (this.zIndexInput) this.zIndexInput.setDisabled(!enabled);
   }
@@ -1322,23 +1379,6 @@ class HotfixesSettingTab extends PluginSettingTab {
           }
           await this.plugin.updateFreezeFirstColumn({
             firstColumnMaxWidthPx: parsed,
-          });
-        });
-      });
-
-    new Setting(section)
-      .setName("Cell height (px)")
-      .setDesc("Control row height / vertical spacing in the frozen table.")
-      .addSlider((slider) => {
-        this.cellHeightSlider = slider;
-        slider
-          .setLimits(18, 96, 1)
-          .setValue(state.cellHeightPx)
-          .setDynamicTooltip();
-        slider.setDisabled(!state.enabled);
-        slider.onChange(async (value) => {
-          await this.plugin.updateFreezeFirstColumn({
-            cellHeightPx: Math.round(value),
           });
         });
       });
