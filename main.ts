@@ -171,7 +171,6 @@ class HotfixesSettingTab extends PluginSettingTab {
         "Keep the first column in Bases table view visible while scrolling horizontally."
       )
       .addToggle((toggle) => {
-        this.enableToggleComponent = toggle;
         toggle.setValue(state.enabled);
         toggle.onChange(async (value) => {
           await this.plugin.updateFreezeFirstColumn({ enabled: value });

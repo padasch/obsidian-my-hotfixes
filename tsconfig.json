@@ -2,8 +2,8 @@
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022", "DOM"],
-    "module": "CommonJS",
-    "moduleResolution": "bundler",
+    "module": "ES2022",
+    "moduleResolution": "node",
     "resolveJsonModule": true,
     "allowJs": true,
     "checkJs": true,
