@@ -35,7 +35,9 @@ const DEFAULT_SETTINGS: HotfixSettings = {
 };
 
 export default class ObsidianHotfixesPlugin extends Plugin {
-  settings: HotfixSettings = structuredClone(DEFAULT_SETTINGS);
+  settings: HotfixSettings = {
+    freezeFirstColumn: { ...DEFAULT_SETTINGS.freezeFirstColumn },
+  };
   private styleElement: HTMLStyleElement | null = null;
 
   async onload() {
