@@ -621,7 +621,11 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 
   private startBaseViewSwitcher() {
     if (!this.baseViewSwitcherObserver) {
-      this.baseViewSwitcherObserver = new MutationObserver(() => {
+      this.baseViewSwitcherObserver = new MutationObserver((mutations) => {
+        if (mutations.every((mutation) => this.isBaseViewSwitcherMutation(mutation))) {
+          return;
+        }
+
         this.scheduleBaseViewSwitcherRefresh();
       });
       this.baseViewSwitcherObserver.observe(document.body, {
@@ -972,7 +976,13 @@ export default class ObsidianHotfixesPlugin extends Plugin {
         if (button.getAttribute("aria-current") === "true") {
           return;
         }
-        void this.switchBaseToView(target.headerEl, view.name);
+        const liveHeaderEl = this.getBaseViewSwitcherHeader(button);
+        if (!liveHeaderEl) {
+          this.scheduleBaseViewSwitcherRefresh();
+          return;
+        }
+
+        void this.switchBaseToView(liveHeaderEl, view.name);
       });
 
       row.appendChild(button);
@@ -1018,6 +1028,14 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 
   private removeBaseViewSwitcherBefore(headerEl: HTMLElement) {
     this.getBaseViewSwitcherBefore(headerEl)?.remove();
+  }
+
+  private getBaseViewSwitcherHeader(element: HTMLElement): HTMLElement | null {
+    const row = element.closest<HTMLElement>(BASE_VIEW_SWITCHER_SELECTOR);
+    const next = row?.nextElementSibling;
+    return next instanceof HTMLElement && next.matches(".bases-header")
+      ? next
+      : null;
   }
 
   private findActiveBaseViewName(
@@ -1123,6 +1141,32 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 
   private normalizeText(value: string): string {
     return value.replace(/\s+/g, " ").trim();
+  }
+
+  private isBaseViewSwitcherMutation(mutation: MutationRecord): boolean {
+    if (
+      mutation.target instanceof HTMLElement &&
+      mutation.target.closest(BASE_VIEW_SWITCHER_SELECTOR)
+    ) {
+      return true;
+    }
+
+    const changedNodes = [...Array.from(mutation.addedNodes), ...Array.from(mutation.removedNodes)];
+    return (
+      changedNodes.length > 0 &&
+      changedNodes.every((node) => this.isBaseViewSwitcherNode(node))
+    );
+  }
+
+  private isBaseViewSwitcherNode(node: Node): boolean {
+    if (!(node instanceof HTMLElement)) {
+      return false;
+    }
+
+    return (
+      node.matches(BASE_VIEW_SWITCHER_SELECTOR) ||
+      node.closest(BASE_VIEW_SWITCHER_SELECTOR) !== null
+    );
   }
 
   private normalizeMenuItemText(item: HTMLElement): string {
