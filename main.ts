@@ -309,7 +309,7 @@ ${selector} .obsidian-hotfixes-hide-original-first-column {
       overflow === "auto" ||
       overflow === "scroll";
 
-    return canScrollByOverflow && container.scrollWidth > container.clientWidth + 1;
+    return canScrollByOverflow || container.scrollWidth > container.clientWidth + 1;
   }
 
   private ensureOverlay(container: HTMLElement): HTMLElement {
