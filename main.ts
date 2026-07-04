@@ -136,25 +136,17 @@ ${selector} {
   position: relative;
 }
 
-${selector} .bases-table {
+${selector} .bases-table,
+${selector} .bases-table-container {
   position: relative;
   overflow-x: auto;
   max-width: 100%;
 }
 
-${selector} .bases-table table {
-  border-collapse: separate;
-  border-spacing: 0;
-  width: max-content;
-  min-width: 100%;
-  table-layout: auto;
-}
-
 ${selector} .obsidian-hotfixes-first-column-overlay {
   position: absolute;
   top: 0;
-  left: ${config.leftOffsetPx}px;
-  width: ${config.firstColumnMaxWidthPx}px;
+  left: 0;
   height: 100%;
   pointer-events: none;
   overflow: hidden;
@@ -162,21 +154,28 @@ ${selector} .obsidian-hotfixes-first-column-overlay {
   background: ${config.backgroundColor};
   ${divider}
   transform: translateX(0px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  will-change: transform, width, height;
 }
 
-${selector} .obsidian-hotfixes-first-column-overlay table {
-  width: ${config.firstColumnMaxWidthPx}px;
-  border-collapse: separate;
-  border-spacing: 0;
-  table-layout: fixed;
+${selector} .obsidian-hotfixes-first-column-overlay .obsidian-hotfixes-overlay-row {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  overflow: hidden;
+  width: 100%;
 }
 
-${selector} .obsidian-hotfixes-first-column-overlay th,
-${selector} .obsidian-hotfixes-first-column-overlay td,
-${selector} .bases-td:first-of-type,
-${selector} .bases-th:first-of-type,
-${selector} table tr td:first-child,
-${selector} table tr th:first-child {
+${selector} .obsidian-hotfixes-overlay-row > .bases-td,
+${selector} .obsidian-hotfixes-overlay-row > .bases-th,
+${selector} .obsidian-hotfixes-overlay-row > td,
+${selector} .obsidian-hotfixes-overlay-row > th,
+${selector} .obsidian-hotfixes-overlay-row > div {
+  width: 100%;
+  min-width: 100%;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -184,9 +183,7 @@ ${selector} table tr th:first-child {
 
 ${selector} .obsidian-hotfixes-hide-original-first-column {
   visibility: hidden;
-  width: ${config.firstColumnMaxWidthPx}px !important;
-  min-width: 120px !important;
-  max-width: ${config.firstColumnMaxWidthPx}px !important;
+  pointer-events: none;
 }
 `.trim();
 
@@ -229,26 +226,32 @@ ${selector} .obsidian-hotfixes-hide-original-first-column {
 
   private patchBaseView(root: HTMLElement) {
     const config = this.settings.freezeFirstColumn;
-    const table = root.querySelector<HTMLTableElement>("table");
+    const container = this.findHorizontalScrollContainer(root);
+    const rows = this.getTableFirstColumnRows(root);
 
-    const container = root.querySelector<HTMLElement>(".bases-table") ?? root;
-    if (!container || !table) {
-      return;
-    }
-
-    const rows = this.getTableFirstColumnRows(table);
     if (!rows.length) {
       return;
     }
 
-    const overlay = this.ensureOverlay(container, table);
-    this.renderOverlayRows(overlay.querySelector("table")!, rows);
-    this.syncOverlayStyles(overlay, container, table);
+    const overlayWidth = this.measureFrozenColumnWidth(rows, config.firstColumnMaxWidthPx);
+
+    for (const rowLike of rows) {
+      const firstCell = rowLike.firstCell;
+      firstCell.classList.add("obsidian-hotfixes-hide-original-first-column");
+      firstCell.style.width = `${overlayWidth}px`;
+      firstCell.style.minWidth = `${Math.max(80, overlayWidth)}px`;
+      firstCell.style.maxWidth = `${overlayWidth}px`;
+      this.frozenCellElements.add(firstCell);
+    }
+
+    const overlay = this.ensureOverlay(container);
+    this.renderOverlayRows(overlay, rows);
+    this.syncOverlayStyles(overlay, container, overlayWidth);
     this.bindOverlayScrollSync(container, overlay);
   }
 
-  private getTableFirstColumnRows(table: HTMLTableElement): TableRowLike[] {
-    const rows = table.querySelectorAll<HTMLElement>("tr, .bases-tr");
+  private getTableFirstColumnRows(root: HTMLElement): TableRowLike[] {
+    const rows = root.querySelectorAll<HTMLElement>("tr, .bases-tr, [role='row']");
     const rowInfo: TableRowLike[] = [];
 
     rows.forEach((row) => {
@@ -261,38 +264,59 @@ ${selector} .obsidian-hotfixes-hide-original-first-column {
         return;
       }
 
-      const parent = row.parentElement?.tagName.toLowerCase();
-      const section =
-        parent === "thead"
+      const parentSection =
+        row.closest(".bases-thead") || row.closest("thead")
           ? "thead"
-          : parent === "tbody"
+          : row.closest(".bases-tbody") || row.closest("tbody")
             ? "tbody"
-            : parent === "tfoot"
+            : row.closest(".bases-tfoot") || row.closest("tfoot")
               ? "tfoot"
               : "other";
 
-      firstCell.classList.add("obsidian-hotfixes-hide-original-first-column");
-      firstCell.style.width = `${this.settings.freezeFirstColumn.firstColumnMaxWidthPx}px`;
-      firstCell.style.minWidth = "120px";
-      firstCell.style.maxWidth = `${this.settings.freezeFirstColumn.firstColumnMaxWidthPx}px`;
-      this.frozenCellElements.add(firstCell);
-
+      const section = parentSection;
       rowInfo.push({ sourceRow: row, firstCell, section });
     });
 
     return rowInfo;
   }
 
-  private ensureOverlay(
-    container: HTMLElement,
-    table: HTMLTableElement
-  ): HTMLElement {
+  private findHorizontalScrollContainer(root: HTMLElement): HTMLElement {
+    const directCandidates = [
+      root.querySelector<HTMLElement>(".bases-table"),
+      root.querySelector<HTMLElement>(".bases-table-container"),
+      root.querySelector<HTMLElement>(".bases-viewport"),
+    ];
+
+    for (const candidate of directCandidates) {
+      if (!candidate) {
+        continue;
+      }
+      if (this.isHorizontallyScrollable(candidate)) {
+        return candidate;
+      }
+    }
+
+    return root;
+  }
+
+  private isHorizontallyScrollable(container: HTMLElement): boolean {
+    const style = window.getComputedStyle(container);
+    const overflowX = style.overflowX;
+    const overflow = style.overflow;
+    const canScrollByOverflow =
+      overflowX === "auto" ||
+      overflowX === "scroll" ||
+      overflow === "auto" ||
+      overflow === "scroll";
+
+    return canScrollByOverflow && container.scrollWidth > container.clientWidth + 1;
+  }
+
+  private ensureOverlay(container: HTMLElement): HTMLElement {
     let overlay = this.activeOverlays.get(container);
     if (!overlay) {
       overlay = document.createElement("div");
       overlay.className = "obsidian-hotfixes-first-column-overlay";
-      const overlayTable = document.createElement("table");
-      overlay.appendChild(overlayTable);
       container.appendChild(overlay);
       this.activeOverlays.set(container, overlay);
     }
@@ -300,67 +324,48 @@ ${selector} .obsidian-hotfixes-hide-original-first-column {
   }
 
   private renderOverlayRows(
-    overlayTable: HTMLTableElement,
+    overlay: HTMLElement,
     rows: TableRowLike[]
   ) {
-    const thead = document.createElement("thead");
-    const tbody = document.createElement("tbody");
-    const tfoot = document.createElement("tfoot");
-    const otherRows: HTMLTableRowElement[] = [];
+    const overlayRows: HTMLElement[] = [];
 
     rows.forEach((rowLike) => {
       const clonedCell = rowLike.firstCell.cloneNode(true) as HTMLTableCellElement;
       clonedCell.classList.add("obsidian-hotfixes-overlay-cell");
-      const clonedRow = document.createElement("tr");
+      const clonedRow = document.createElement("div");
+      clonedRow.className = `obsidian-hotfixes-overlay-row obsidian-hotfixes-overlay-${rowLike.section}`;
       clonedRow.style.height = `${Math.max(1, rowLike.sourceRow.getBoundingClientRect().height)}px`;
       clonedRow.appendChild(clonedCell);
-
-      switch (rowLike.section) {
-        case "thead":
-          thead.appendChild(clonedRow);
-          break;
-        case "tfoot":
-          tfoot.appendChild(clonedRow);
-          break;
-        default:
-          if (rowLike.section === "tbody") {
-            tbody.appendChild(clonedRow);
-          } else {
-            otherRows.push(clonedRow);
-          }
-          break;
-      }
+      overlayRows.push(clonedRow);
     });
 
-    overlayTable.replaceChildren();
-    if (thead.childNodes.length) {
-      overlayTable.appendChild(thead);
-    }
-    if (tbody.childNodes.length) {
-      if (otherRows.length) {
-        otherRows.forEach((rowLike) => tbody.appendChild(rowLike));
-      }
-      overlayTable.appendChild(tbody);
-    } else if (otherRows.length) {
-      const fallbackBody = document.createElement("tbody");
-      otherRows.forEach((rowLike) => fallbackBody.appendChild(rowLike));
-      overlayTable.appendChild(fallbackBody);
-    }
-    if (tfoot.childNodes.length) {
-      overlayTable.appendChild(tfoot);
-    }
+    overlay.replaceChildren();
+    overlay.append(...overlayRows);
   }
 
   private syncOverlayStyles(
     overlay: HTMLElement,
     container: HTMLElement,
-    table: HTMLTableElement
+    width: number
   ) {
     const config = this.settings.freezeFirstColumn;
-    overlay.style.width = `${config.firstColumnMaxWidthPx}px`;
+    overlay.style.width = `${width}px`;
     overlay.style.left = `${config.leftOffsetPx}px`;
-    overlay.style.height = `${Math.max(1, table.getBoundingClientRect().height)}px`;
+    overlay.style.height = `${Math.max(1, Math.ceil(container.scrollHeight))}px`;
     this.syncOverlayScroll(container, overlay);
+  }
+
+  private measureFrozenColumnWidth(
+    rows: TableRowLike[],
+    maxWidth: number
+  ): number {
+    const candidateWidth = rows.reduce<number>((acc, rowLike) => {
+      const rect = rowLike.firstCell.getBoundingClientRect();
+      return Math.max(acc, Math.ceil(rect.width), rowLike.firstCell.offsetWidth);
+    }, 0);
+
+    const resolved = Math.max(80, candidateWidth || maxWidth);
+    return Math.min(maxWidth, resolved);
   }
 
   private bindOverlayScrollSync(
