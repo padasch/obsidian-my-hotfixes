@@ -25,8 +25,8 @@ interface HotfixSettings {
 }
 
 interface TableRowLike {
-  sourceRow: HTMLTableRowElement;
-  firstCell: HTMLTableCellElement;
+  sourceRow: HTMLElement;
+  firstCell: HTMLElement;
   section: "thead" | "tbody" | "tfoot" | "other";
 }
 
@@ -248,11 +248,15 @@ ${selector} .obsidian-hotfixes-hide-original-first-column {
   }
 
   private getTableFirstColumnRows(table: HTMLTableElement): TableRowLike[] {
-    const rows = table.querySelectorAll<HTMLTableRowElement>("tr");
+    const rows = table.querySelectorAll<HTMLElement>("tr, .bases-tr");
     const rowInfo: TableRowLike[] = [];
 
     rows.forEach((row) => {
-      const firstCell = row.querySelector<HTMLTableCellElement>(":scope > td:first-child, :scope > th:first-child");
+      const firstCell =
+        row.querySelector<HTMLElement>(
+          ":scope > .bases-td:first-child, :scope > .bases-th:first-child, :scope > td:first-child, :scope > th:first-child"
+        ) ??
+        row.querySelector<HTMLElement>(":scope > *:first-child");
       if (!firstCell) {
         return;
       }
