@@ -4,14 +4,17 @@ import {
   type BasesViewConfig,
   HoverParent,
   HoverPopover,
+  LinkValue,
   Keymap,
   RenderContext,
   PaneType,
   Plugin,
   PluginSettingTab,
+  MarkdownRenderer,
   QueryController,
   Setting,
   TextComponent,
+  UrlValue,
   parsePropertyId,
   type BasesPropertyId,
 } from "obsidian";
@@ -717,6 +720,59 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
     );
   }
 
+  private renderCellText(container: HTMLElement, textValue: string) {
+    container.empty();
+    container.createSpan({ text: textValue });
+    if (textValue) {
+      container.title = textValue;
+    }
+  }
+
+  private renderLinkFriendlyCell(
+    container: HTMLElement,
+    value: any,
+    textValue: string,
+    sourcePath: string
+  ): boolean {
+    if (!value || typeof textValue !== "string") {
+      return false;
+    }
+
+    if (
+      value instanceof UrlValue ||
+      value instanceof LinkValue ||
+      this.containsLikelyLinkSyntax(textValue)
+    ) {
+      container.empty();
+
+      void MarkdownRenderer.render(
+        this.plugin.app,
+        textValue,
+        container,
+        sourcePath,
+        this.plugin
+      ).catch(() => {
+        this.renderCellText(container, textValue);
+      });
+      return true;
+    }
+
+    return false;
+  }
+
+  private containsLikelyLinkSyntax(value: string): boolean {
+    const normalized = value.trim();
+    if (!normalized) {
+      return false;
+    }
+
+    if (/\[\[[^\]]+\]\]/.test(normalized)) {
+      return true;
+    }
+
+    return /(?:https?:\/\/|www\.)[^\s<>"'()]+/i.test(normalized);
+  }
+
   private renderCellValue(
     cell: HTMLTableCellElement,
     entry: any,
@@ -773,17 +829,33 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
     }
 
     if (value && featureSettings.preserveLinks) {
-      const context = new RenderContext();
-      context.hoverPopover = this.hoverPopover;
-      value.renderTo(cell, context);
-      if (textValue) {
-        cell.title = textValue;
+      const content = cell.createSpan();
+      const sourcePath = entry?.file?.path ?? "";
+      const renderedAsLinkFriendly = this.renderLinkFriendlyCell(
+        content,
+        value,
+        textValue,
+        sourcePath
+      );
+
+      if (!renderedAsLinkFriendly) {
+        try {
+          const context = new RenderContext();
+          context.hoverPopover = this.hoverPopover;
+          value.renderTo(content, context);
+        } catch (error) {
+          console.warn(
+            "[Obsidian Hotfixes] Failed to render value, falling back to plain text.",
+            propertyId,
+            error
+          );
+
+          this.renderCellText(content, textValue);
+        }
       }
     } else {
-      const span = cell.createSpan({ text: textValue });
-      if (textValue) {
-        span.title = textValue;
-      }
+      const content = cell.createSpan();
+      this.renderCellText(content, textValue);
     }
 
     if (parsed.type === "note" && featureSettings.editableNotes) {
@@ -791,6 +863,10 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
       cell.addEventListener("dblclick", () => {
         void this.beginEditNoteCell(cell, entry, parsed.name, textValue);
       });
+    }
+
+    if (textValue) {
+      cell.title = textValue;
     }
   }
 
