@@ -333,6 +333,10 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   background: var(--background-modifier-border);
 }
 
+.obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-frozen-bases-reorder-handle {
+  cursor: grab;
+}
+
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th[data-drag-target="true"] {
   outline: 1px solid var(--interactive-accent);
 }
@@ -638,6 +642,7 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
       header.style.minWidth = `${width}px`;
       header.style.maxWidth = `${width}px`;
       if (features.enableReorder) {
+        header.addClass("obsidian-hotfixes-frozen-bases-reorder-handle");
         header.draggable = true;
         header.addEventListener("dragstart", (event) =>
           this.onColumnDragStart(event, propertyKey)
@@ -947,6 +952,10 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
   }
 
   private onColumnDragStart(event: DragEvent, propertyId: string) {
+    if (event.button !== 0) {
+      return;
+    }
+
     if (!getFrozenTableViewFeatures(this.config).enableReorder) {
       return;
     }
