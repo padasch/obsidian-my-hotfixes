@@ -1,9 +1,11 @@
 import {
   App,
   BasesView,
+  type BasesViewConfig,
   HoverParent,
   HoverPopover,
   Keymap,
+  RenderContext,
   PaneType,
   Plugin,
   PluginSettingTab,
@@ -20,6 +22,75 @@ const DEFAULT_COLUMN_WIDTH_PX = 180;
 const MIN_RESIZABLE_COLUMN_WIDTH_PX = 60;
 const DRAGGABLE_ORDER_CONFIG_KEY = "obsidian-hotfixes:column-order";
 const COLUMN_WIDTHS_CONFIG_KEY = "obsidian-hotfixes:column-widths";
+
+const FROZEN_TABLE_RESIZE_FEATURE_KEY = "obsidian-hotfixes:view-feature-resize";
+const FROZEN_TABLE_REORDER_FEATURE_KEY = "obsidian-hotfixes:view-feature-reorder";
+const FROZEN_TABLE_LINKS_FEATURE_KEY = "obsidian-hotfixes:view-feature-preserve-links";
+const FROZEN_TABLE_EDIT_FEATURE_KEY = "obsidian-hotfixes:view-feature-edit-notes";
+const FROZEN_TABLE_WRAP_MODE_FEATURE_KEY = "obsidian-hotfixes:view-feature-wrap-mode";
+
+type FrozenTableWrapMode = "narrow" | "wide";
+
+interface FrozenTableViewFeatures {
+  enableResize: boolean;
+  enableReorder: boolean;
+  preserveLinks: boolean;
+  editableNotes: boolean;
+  wrapMode: FrozenTableWrapMode;
+}
+
+const DEFAULT_FROZEN_TABLE_FEATURES: FrozenTableViewFeatures = {
+  enableResize: false,
+  enableReorder: false,
+  preserveLinks: true,
+  editableNotes: false,
+  wrapMode: "narrow",
+};
+
+function getBooleanFeatureValue(
+  value: unknown,
+  fallback: boolean
+): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function getStringFeatureValue(
+  value: unknown,
+  allowed: ReadonlyArray<string>,
+  fallback: string
+): string {
+  return typeof value === "string" && allowed.includes(value)
+    ? value
+    : fallback;
+}
+
+function getFrozenTableViewFeatures(
+  config: Pick<BasesViewConfig, "get">
+): FrozenTableViewFeatures {
+  return {
+    enableResize: getBooleanFeatureValue(
+      config.get(FROZEN_TABLE_RESIZE_FEATURE_KEY),
+      DEFAULT_FROZEN_TABLE_FEATURES.enableResize
+    ),
+    enableReorder: getBooleanFeatureValue(
+      config.get(FROZEN_TABLE_REORDER_FEATURE_KEY),
+      DEFAULT_FROZEN_TABLE_FEATURES.enableReorder
+    ),
+    preserveLinks: getBooleanFeatureValue(
+      config.get(FROZEN_TABLE_LINKS_FEATURE_KEY),
+      DEFAULT_FROZEN_TABLE_FEATURES.preserveLinks
+    ),
+    editableNotes: getBooleanFeatureValue(
+      config.get(FROZEN_TABLE_EDIT_FEATURE_KEY),
+      DEFAULT_FROZEN_TABLE_FEATURES.editableNotes
+    ),
+    wrapMode: getStringFeatureValue(
+      config.get(FROZEN_TABLE_WRAP_MODE_FEATURE_KEY),
+      ["narrow", "wide"],
+      DEFAULT_FROZEN_TABLE_FEATURES.wrapMode
+    ) as FrozenTableWrapMode,
+  };
+}
 
 interface FreezeFirstColumnHotfixSettings {
   enabled: boolean;
@@ -60,6 +131,51 @@ export default class ObsidianHotfixesPlugin extends Plugin {
       icon: "lucide-layout-grid",
       factory: (controller, containerEl) =>
         new FrozenTableBasesView(controller, containerEl, this),
+      options: (config) => {
+        const featureSettings = getFrozenTableViewFeatures(config);
+        return [
+          {
+            type: "group",
+            displayName: "Frozen table options",
+            items: [
+              {
+                type: "toggle",
+                key: FROZEN_TABLE_RESIZE_FEATURE_KEY,
+                displayName: "Enable column resizing",
+                default: featureSettings.enableResize,
+              },
+              {
+                type: "toggle",
+                key: FROZEN_TABLE_REORDER_FEATURE_KEY,
+                displayName: "Enable column reordering",
+                default: featureSettings.enableReorder,
+              },
+              {
+                type: "toggle",
+                key: FROZEN_TABLE_LINKS_FEATURE_KEY,
+                displayName: "Preserve inline link rendering",
+                default: featureSettings.preserveLinks,
+              },
+              {
+                type: "toggle",
+                key: FROZEN_TABLE_EDIT_FEATURE_KEY,
+                displayName: "Enable note-cell editing",
+                default: featureSettings.editableNotes,
+              },
+              {
+                type: "dropdown",
+                key: FROZEN_TABLE_WRAP_MODE_FEATURE_KEY,
+                displayName: "Cell wrapping",
+                default: featureSettings.wrapMode,
+                options: {
+                  narrow: "Narrow (truncate)",
+                  wide: "Large (wrap)",
+                },
+              },
+            ],
+          },
+        ];
+      },
     });
     if (!registered) {
       console.warn(
@@ -139,13 +255,13 @@ export default class ObsidianHotfixesPlugin extends Plugin {
 }
 
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table {
-  width: 100%;
+  width: max-content;
   border-collapse: separate;
   border-spacing: 0;
   font-size: var(--font-ui-smaller);
   table-layout: fixed;
   max-width: none;
-  position: relative;
+  min-width: max-content;
 }
 
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table thead th {
@@ -161,19 +277,30 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   padding: 8px 10px;
   border-bottom: 1px solid var(--background-modifier-border);
   border-right: 1px solid var(--background-modifier-border);
+  vertical-align: top;
+}
+
+.obsidian-hotfixes-wrap-narrow .obsidian-hotfixes-table th,
+.obsidian-hotfixes-wrap-narrow .obsidian-hotfixes-table td {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  vertical-align: top;
+}
+
+.obsidian-hotfixes-wrap-wide .obsidian-hotfixes-table th,
+.obsidian-hotfixes-wrap-wide .obsidian-hotfixes-table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table th:first-child,
 .obsidian-hotfixes-frozen-bases-root .obsidian-hotfixes-table td:first-child {
   position: sticky;
   left: 0;
-  min-width: var(--obsidian-hotfixes-first-column-width, var(--obsidian-hotfixes-first-column-min-width));
+  min-width: var(--obsidian-hotfixes-first-column-min-width);
   width: var(--obsidian-hotfixes-first-column-width, var(--obsidian-hotfixes-first-column-min-width));
-  max-width: var(--obsidian-hotfixes-first-column-width, var(--obsidian-hotfixes-first-column-max-width));
+  max-width: var(--obsidian-hotfixes-first-column-max-width);
   background: var(--obsidian-hotfixes-first-column-bg);
   z-index: var(--obsidian-hotfixes-first-column-z);
   border-right: ${divider};
@@ -229,6 +356,21 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   border-top: 1px solid var(--background-modifier-border);
 }
 
+.obsidian-hotfixes-note-cell {
+  cursor: text;
+}
+
+.obsidian-hotfixes-note-cell textarea,
+.obsidian-hotfixes-note-cell input {
+  width: 100%;
+  border: none;
+  padding: 0;
+  font: inherit;
+  background: transparent;
+  color: inherit;
+  resize: none;
+}
+
 .obsidian-hotfixes-frozen-bases-empty {
   color: var(--text-muted);
   padding: 0.75rem 0.5rem;
@@ -279,6 +421,7 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
   hoverPopover: HoverPopover | null = null;
   private readonly root: HTMLDivElement;
   private activeView: HTMLDivElement | null = null;
+  private activeEditor: HTMLTextAreaElement | null = null;
   private currentPropertyOrder: string[] = [];
   private readonly columnElements = new Map<string, HTMLTableColElement>();
   private readonly headerElements = new Map<string, HTMLTableHeaderCellElement>();
@@ -294,6 +437,11 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
   private activeDragTarget: string | null = null;
 
   private readonly onResizePointerMove = (event: PointerEvent) => {
+    const features = getFrozenTableViewFeatures(this.config);
+    if (!features.enableResize) {
+      return;
+    }
+
     if (
       !this.activeResizeColumn ||
       this.activeResizeColumnIndex === null
@@ -314,6 +462,11 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
   };
 
   private readonly onResizePointerUp = () => {
+    const features = getFrozenTableViewFeatures(this.config);
+    if (!features.enableResize) {
+      return;
+    }
+
     if (!this.activeResizeColumn || this.activeResizeColumnIndex === null) {
       return;
     }
@@ -334,6 +487,11 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
     propertyId: string,
     index: number
   ) => {
+    const features = getFrozenTableViewFeatures(this.config);
+    if (!features.enableResize) {
+      return;
+    }
+
     if (event.button !== 0) {
       return;
     }
@@ -411,6 +569,13 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
 
   private render() {
     this.root.empty();
+    if (this.activeEditor) {
+      this.activeEditor = null;
+    }
+
+    const features = getFrozenTableViewFeatures(this.config);
+    this.root.className = `obsidian-hotfixes-frozen-bases-root obsidian-hotfixes-wrap-${features.wrapMode}`;
+
     this.currentPropertyOrder = [];
     this.columnElements.clear();
     this.headerElements.clear();
@@ -472,28 +637,31 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
       header.style.width = `${width}px`;
       header.style.minWidth = `${width}px`;
       header.style.maxWidth = `${width}px`;
-      header.draggable = true;
+      if (features.enableReorder) {
+        header.draggable = true;
+        header.addEventListener("dragstart", (event) =>
+          this.onColumnDragStart(event, propertyKey)
+        );
+        header.addEventListener("dragover", (event) =>
+          this.onColumnDragOver(event, propertyKey)
+        );
+        header.addEventListener("drop", (event) =>
+          this.onColumnDrop(event, propertyKey)
+        );
+        header.addEventListener("dragleave", () => this.clearDragTargetStyles());
+        header.addEventListener("dragend", this.onColumnDragEnd);
+      }
       this.headerElements.set(propertyKey, header);
 
-      header.addEventListener("dragstart", (event) =>
-        this.onColumnDragStart(event, propertyKey)
-      );
-      header.addEventListener("dragover", (event) =>
-        this.onColumnDragOver(event, propertyKey)
-      );
-      header.addEventListener("drop", (event) =>
-        this.onColumnDrop(event, propertyKey)
-      );
-      header.addEventListener("dragleave", () => this.clearDragTargetStyles());
-      header.addEventListener("dragend", this.onColumnDragEnd);
-
-      const handle = header.createSpan({
-        cls: "obsidian-hotfixes-frozen-bases-resize-handle",
-      });
-      handle.setAttr("draggable", "false");
-      handle.addEventListener("pointerdown", (event) =>
-        this.startColumnResize(event, propertyKey, index)
-      );
+      if (features.enableResize) {
+        const handle = header.createSpan({
+          cls: "obsidian-hotfixes-frozen-bases-resize-handle",
+        });
+        handle.setAttr("draggable", "false");
+        handle.addEventListener("pointerdown", (event) =>
+          this.startColumnResize(event, propertyKey, index)
+        );
+      }
     });
 
     const tbody = table.createTBody();
@@ -521,59 +689,12 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
           const propertyKey = this.getPropertyId(propertyId);
           const width = this.getColumnWidth(propertyKey, index);
           const cell = row.createEl("td");
-          const parsed = parsePropertyId(propertyId);
           cell.dataset.propertyId = propertyKey;
           cell.style.width = `${width}px`;
           cell.style.minWidth = `${width}px`;
           cell.style.maxWidth = `${width}px`;
 
-          if (parsed.type === "file" && parsed.name === "name") {
-            const link = cell.createEl("a", {
-              text: entry.file.name,
-              href: entry.file.path,
-            });
-            link.addClass("internal-link");
-            link.addEventListener("click", (event) => {
-              if (event.button !== 0 && event.button !== 1) {
-                return;
-              }
-
-              const pane = Keymap.isModEvent(event);
-              event.preventDefault();
-
-              if (pane === true || pane === false) {
-                void this.plugin.app.workspace.openLinkText(
-                  entry.file.path,
-                  "",
-                  Boolean(pane)
-                );
-                return;
-              }
-
-              void this.plugin.app.workspace.openLinkText(
-                entry.file.path,
-                "",
-                pane as PaneType
-              );
-            });
-            link.addEventListener("mouseover", (event) => {
-              this.plugin.app.workspace.trigger("hover-link", {
-                event,
-                source: "bases",
-                hoverParent: this,
-                targetEl: link,
-                linktext: entry.file.path,
-              });
-            });
-            continue;
-          }
-
-          const value = entry.getValue(propertyId);
-          const textValue = value ? value.toString() : "";
-          cell.createSpan({ text: textValue });
-          if (textValue) {
-            cell.title = textValue;
-          }
+          this.renderCellValue(cell, entry, propertyId, features);
         }
       }
     }
@@ -589,6 +710,136 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
       this.plugin.settings.freezeFirstColumn.firstColumnMinWidthPx,
       DEFAULT_COLUMN_WIDTH_PX
     );
+  }
+
+  private renderCellValue(
+    cell: HTMLTableCellElement,
+    entry: any,
+    propertyId: BasesPropertyId,
+    featureSettings: FrozenTableViewFeatures
+  ) {
+    const parsed = parsePropertyId(propertyId);
+    const value = entry.getValue(propertyId);
+    const textValue = value ? value.toString() : "";
+    cell.classList.remove("obsidian-hotfixes-note-cell");
+
+    if (parsed.type === "file" && parsed.name === "name") {
+      const link = cell.createEl("a", {
+        text: entry.file.name,
+        href: entry.file.path,
+      });
+      link.addClass("internal-link");
+      link.addEventListener("click", (event) => {
+        if (event.button !== 0 && event.button !== 1) {
+          return;
+        }
+
+        const pane = Keymap.isModEvent(event);
+        event.preventDefault();
+
+        if (pane === true || pane === false) {
+          void this.plugin.app.workspace.openLinkText(
+            entry.file.path,
+            "",
+            Boolean(pane)
+          );
+          return;
+        }
+
+        void this.plugin.app.workspace.openLinkText(
+          entry.file.path,
+          "",
+          pane as PaneType
+        );
+      });
+      link.addEventListener("mouseover", (event) => {
+        this.plugin.app.workspace.trigger("hover-link", {
+          event,
+          source: "bases",
+          hoverParent: this,
+          targetEl: link,
+          linktext: entry.file.path,
+        });
+      });
+      if (textValue) {
+        cell.title = textValue;
+      }
+      return;
+    }
+
+    if (value && featureSettings.preserveLinks) {
+      const context = new RenderContext();
+      context.hoverPopover = this.hoverPopover;
+      value.renderTo(cell, context);
+      if (textValue) {
+        cell.title = textValue;
+      }
+    } else {
+      const span = cell.createSpan({ text: textValue });
+      if (textValue) {
+        span.title = textValue;
+      }
+    }
+
+    if (parsed.type === "note" && featureSettings.editableNotes) {
+      cell.classList.add("obsidian-hotfixes-note-cell");
+      cell.addEventListener("dblclick", () => {
+        void this.beginEditNoteCell(cell, entry, parsed.name, textValue);
+      });
+    }
+  }
+
+  private async beginEditNoteCell(
+    cell: HTMLTableCellElement,
+    entry: any,
+    propertyName: string,
+    initialValue: string
+  ) {
+    if (this.activeEditor) {
+      return;
+    }
+
+    const previousValue = cell.innerText;
+    const editor = document.createElement("textarea");
+    editor.value = initialValue;
+    editor.rows = 1;
+
+    const cancel = () => {
+      this.activeEditor = null;
+      this.render();
+    };
+
+    const commit = async () => {
+      const nextValue = editor.value;
+      if (nextValue !== previousValue) {
+        await this.plugin.app.fileManager.processFrontMatter(
+          entry.file,
+          (frontmatter) => {
+            frontmatter[propertyName] = nextValue;
+          }
+        );
+      }
+      cancel();
+    };
+
+    this.activeEditor = editor;
+    cell.empty();
+    cell.appendChild(editor);
+    editor.focus();
+    editor.className = "obsidian-hotfixes-note-editor";
+
+    editor.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        void commit();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancel();
+      }
+    });
+    editor.addEventListener("blur", () => {
+      void commit();
+    });
   }
 
   private getSavedColumnWidths(): Map<string, number> {
@@ -696,6 +947,10 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
   }
 
   private onColumnDragStart(event: DragEvent, propertyId: string) {
+    if (!getFrozenTableViewFeatures(this.config).enableReorder) {
+      return;
+    }
+
     if (event.dataTransfer) {
       this.draggingColumn = propertyId;
       event.dataTransfer.effectAllowed = "move";
@@ -704,6 +959,10 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
   }
 
   private onColumnDragOver(event: DragEvent, propertyId: string) {
+    if (!getFrozenTableViewFeatures(this.config).enableReorder) {
+      return;
+    }
+
     if (!this.draggingColumn || this.draggingColumn === propertyId) {
       return;
     }
@@ -727,6 +986,10 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
   }
 
   private onColumnDrop(event: DragEvent, targetPropertyId: string) {
+    if (!getFrozenTableViewFeatures(this.config).enableReorder) {
+      return;
+    }
+
     event.preventDefault();
     if (!this.draggingColumn || this.draggingColumn === targetPropertyId) {
       return;
@@ -754,6 +1017,10 @@ class FrozenTableBasesView extends BasesView implements HoverParent {
   }
 
   private onColumnDragEnd = () => {
+    if (!getFrozenTableViewFeatures(this.config).enableReorder) {
+      return;
+    }
+
     this.draggingColumn = null;
     this.clearDragTargetStyles();
   };
