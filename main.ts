@@ -5,9 +5,12 @@ import {
   type BasesConfigFile,
   BasesView,
   type BasesViewConfig,
+  ButtonComponent,
+  FuzzyMatch,
   HoverParent,
   HoverPopover,
   LinkValue,
+  FuzzySuggestModal,
   Keymap,
   RenderContext,
   PaneType,
@@ -16,6 +19,7 @@ import {
   MarkdownRenderer,
   QueryController,
   Setting,
+  DropdownComponent,
   TextComponent,
   TFile,
   ToggleComponent,
@@ -113,6 +117,7 @@ const CALLOUT_EDIT_BUTTON_SELECTORS = [
 
 type FrozenTableWrapMode = "narrow" | "wide";
 type FrozenTableSortDirection = "ASC" | "DESC";
+type HomepageSidebar = "left" | "right";
 
 interface FrozenTableSortState {
   propertyId: string;
@@ -255,6 +260,7 @@ interface CalloutEditGuardHotfixSettings {
 interface HomepageTabSettings {
   enabled: boolean;
   notePath: string;
+  sidebar: HomepageSidebar;
   title: string;
   openOnStartup: boolean;
 }
@@ -286,6 +292,7 @@ const DEFAULT_SETTINGS: HotfixSettings = {
   homepage: {
     enabled: true,
     notePath: "",
+    sidebar: "left",
     title: "Homepage",
     openOnStartup: false,
   },
@@ -519,13 +526,22 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     return this.getHomepageLeaves()[0] ?? null;
   }
 
+  private getHomepageSidebarLeaf(): WorkspaceLeaf {
+    const side = this.settings.homepage.sidebar;
+    const preferred = side === "left"
+      ? this.app.workspace.getLeftLeaf(false)
+      : this.app.workspace.getRightLeaf(false);
+
+    return preferred ?? this.app.workspace.getLeaf(false);
+  }
+
   private async getOrCreateHomepageLeaf(): Promise<WorkspaceLeaf> {
     const existing = this.getHomepageLeaf();
     if (existing) {
       return existing;
     }
 
-    return this.app.workspace.getLeaf("split", "vertical");
+    return this.getHomepageSidebarLeaf();
   }
 
   private async openHomepageTab(options: { focus?: boolean } = {}) {
@@ -1757,7 +1773,45 @@ class HomepageSidebarView extends ItemView {
       ""
     );
     const contentEl = this.contentRoot.createDiv({
-      cls: HOMEPAGE_VIEW_CONTENT_CLASS,
+      cls: `${HOMEPAGE_VIEW_CONTENT_CLASS} markdown-preview-view`,
+    });
+    contentEl.addClass("markdown-rendered");
+    contentEl.addEventListener("click", (event) => {
+      if (!(event.target instanceof HTMLElement)) {
+        return;
+      }
+
+      const link = event.target.closest("a");
+      if (!(link instanceof HTMLAnchorElement)) {
+        return;
+      }
+
+      const linkHref = (link.getAttribute("href") ?? "").trim();
+      if (!linkHref) {
+        return;
+      }
+
+      if (link.classList.contains("external-link") || linkHref.startsWith("http:") || linkHref.startsWith("https:") || linkHref.startsWith("mailto:") || linkHref.startsWith("tel:")) {
+        return;
+      }
+
+      const resolvedLinkText = (
+        link.getAttribute("data-href") ??
+        linkHref
+      ).trim();
+      if (!resolvedLinkText) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const pane = Keymap.isModEvent(event);
+      void this.plugin.app.workspace.openLinkText(
+        resolvedLinkText,
+        this.filePath ?? "",
+        pane === true || pane === false ? Boolean(pane) : pane
+      );
     });
 
     await MarkdownRenderer.render(
@@ -1774,6 +1828,38 @@ class HomepageSidebarView extends ItemView {
       cls: HOMEPAGE_VIEW_EMPTY_CLASS,
       text: message,
     });
+  }
+}
+
+class HomepageFileSuggestionModal extends FuzzySuggestModal<TFile> {
+  private readonly items: TFile[];
+
+  constructor(
+    app: App,
+    private readonly onSelectCallback: (value: string) => Promise<void> | void
+  ) {
+    super(app);
+    this.items = this.app.vault.getMarkdownFiles().sort((left, right) =>
+      left.path.localeCompare(right.path, undefined, { sensitivity: "base" })
+    );
+    this.setPlaceholder("Select homepage markdown note");
+    this.limit = 100;
+  }
+
+  getItems(): TFile[] {
+    return this.items;
+  }
+
+  getItemText(file: TFile): string {
+    return file.path;
+  }
+
+  renderSuggestion(item: FuzzyMatch<TFile>, element: HTMLElement): void {
+    element.setText(item.item.path);
+  }
+
+  onChooseItem(file: TFile): void {
+    void this.onSelectCallback(file.path);
   }
 }
 
@@ -2847,7 +2933,9 @@ class HotfixesSettingTab extends PluginSettingTab {
   private embeddedBaseToggle: ToggleComponent | null = null;
   private homepageEnabledToggle: ToggleComponent | null = null;
   private homepageFilePathInput: TextComponent | null = null;
+  private homepageFilePickerButton: ButtonComponent | null = null;
   private homepageTitleInput: TextComponent | null = null;
+  private homepageSidebarSelect: DropdownComponent | null = null;
   private homepageOpenOnStartupToggle: ToggleComponent | null = null;
 
   constructor(app: App, plugin: ObsidianHotfixesPlugin) {
@@ -2871,8 +2959,14 @@ class HotfixesSettingTab extends PluginSettingTab {
     if (this.homepageFilePathInput) {
       this.homepageFilePathInput.setDisabled(!enabled);
     }
+    if (this.homepageFilePickerButton) {
+      this.homepageFilePickerButton.setDisabled(!enabled);
+    }
     if (this.homepageTitleInput) {
       this.homepageTitleInput.setDisabled(!enabled);
+    }
+    if (this.homepageSidebarSelect) {
+      this.homepageSidebarSelect.setDisabled(!enabled);
     }
     if (this.homepageOpenOnStartupToggle) {
       this.homepageOpenOnStartupToggle.setDisabled(!enabled);
@@ -3067,17 +3161,29 @@ class HotfixesSettingTab extends PluginSettingTab {
       });
 
     new Setting(homepageSection)
-      .setName("Homepage note path")
+      .setName("Homepage note")
       .setDesc(
-        "Path to the markdown note used in the sidebar (for example Notes/Homepage.md)."
+        "Choose the markdown note used for the sidebar tab from Obsidian's fuzzy file finder."
       )
       .addText((text) => {
         this.homepageFilePathInput = text;
         text.setValue(homepageState.notePath);
         text.setDisabled(!homepageState.enabled);
         text.setPlaceholder("Notes/Homepage.md");
-        text.onChange(async (value) => {
-          await this.plugin.updateHomepageSettings({ notePath: value.trim() });
+        text.inputEl.readOnly = true;
+      })
+      .addButton((button) => {
+        this.homepageFilePickerButton = button;
+        button.setButtonText("Choose note");
+        button.setTooltip("Open Obsidian fuzzy file finder");
+        button.setDisabled(!homepageState.enabled);
+        button.onClick(() => {
+          new HomepageFileSuggestionModal(this.app, async (value) => {
+            await this.plugin.updateHomepageSettings({ notePath: value });
+            if (this.homepageFilePathInput) {
+              this.homepageFilePathInput.setValue(value);
+            }
+          }).open();
         });
       });
 
@@ -3091,6 +3197,22 @@ class HotfixesSettingTab extends PluginSettingTab {
         text.setPlaceholder("Homepage");
         text.onChange(async (value) => {
           await this.plugin.updateHomepageSettings({ title: value.trim() });
+        });
+      });
+
+    new Setting(homepageSection)
+      .setName("Homepage sidebar")
+      .setDesc("Choose whether the homepage opens in the left or right sidebar.")
+      .addDropdown((dropdown) => {
+        this.homepageSidebarSelect = dropdown;
+        dropdown.addOption("left", "Left");
+        dropdown.addOption("right", "Right");
+        dropdown.setValue(homepageState.sidebar);
+        dropdown.setDisabled(!homepageState.enabled);
+        dropdown.onChange(async (value) => {
+          await this.plugin.updateHomepageSettings({
+            sidebar: value === "right" ? "right" : "left",
+          });
         });
       });
 
