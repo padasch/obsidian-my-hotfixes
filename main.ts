@@ -1,5 +1,7 @@
 import {
   App,
+  ItemView,
+  Notice,
   type BasesConfigFile,
   BasesView,
   type BasesViewConfig,
@@ -21,9 +23,15 @@ import {
   parsePropertyId,
   parseYaml,
   type BasesPropertyId,
+  type ViewStateResult,
+  type WorkspaceLeaf,
 } from "obsidian";
 
 const STYLE_ELEMENT_ID = "obsidian-hotfixes-runtime-styles";
+const HOMEPAGE_VIEW_TYPE = "obsidian-hotfixes-homepage";
+const HOMEPAGE_VIEW_CLASS = "obsidian-hotfixes-homepage-root";
+const HOMEPAGE_VIEW_CONTENT_CLASS = "obsidian-hotfixes-homepage-content";
+const HOMEPAGE_VIEW_EMPTY_CLASS = "obsidian-hotfixes-homepage-empty";
 const FROZEN_TABLE_VIEW_TYPE = "obsidian-hotfixes-frozen-table";
 const DEFAULT_COLUMN_WIDTH_PX = 180;
 const MIN_RESIZABLE_COLUMN_WIDTH_PX = 60;
@@ -244,10 +252,18 @@ interface CalloutEditGuardHotfixSettings {
   enabled: boolean;
 }
 
+interface HomepageTabSettings {
+  enabled: boolean;
+  notePath: string;
+  title: string;
+  openOnStartup: boolean;
+}
+
 interface HotfixSettings {
   freezeFirstColumn: FreezeFirstColumnHotfixSettings;
   baseViewSwitcher: BaseViewSwitcherHotfixSettings;
   calloutEditGuard: CalloutEditGuardHotfixSettings;
+  homepage: HomepageTabSettings;
 }
 
 const DEFAULT_SETTINGS: HotfixSettings = {
@@ -266,6 +282,12 @@ const DEFAULT_SETTINGS: HotfixSettings = {
   },
   calloutEditGuard: {
     enabled: true,
+  },
+  homepage: {
+    enabled: true,
+    notePath: "",
+    title: "Homepage",
+    openOnStartup: false,
   },
 };
 
@@ -295,6 +317,7 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     freezeFirstColumn: { ...DEFAULT_SETTINGS.freezeFirstColumn },
     baseViewSwitcher: { ...DEFAULT_SETTINGS.baseViewSwitcher },
     calloutEditGuard: { ...DEFAULT_SETTINGS.calloutEditGuard },
+    homepage: { ...DEFAULT_SETTINGS.homepage },
   };
   private styleElement: HTMLStyleElement | null = null;
   private baseViewSwitcherObserver: MutationObserver | null = null;
@@ -305,6 +328,9 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     await this.loadSettings();
     this.applyStyles();
     this.registerSettingTab();
+    this.registerView(HOMEPAGE_VIEW_TYPE, (leaf) =>
+      new HomepageSidebarView(leaf, this)
+    );
     this.registerCalloutEditGuard();
     const registered = this.registerBasesView(FROZEN_TABLE_VIEW_TYPE, {
       name: "Frozen Table",
@@ -395,8 +421,34 @@ export default class ObsidianHotfixesPlugin extends Plugin {
         }
       })
     );
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (file instanceof TFile && file.path === this.getHomepageNotePath()) {
+          this.refreshOpenHomepageViews();
+        }
+      })
+    );
+    this.addCommand({
+      id: "open-homepage-tab",
+      name: "Open homepage tab",
+      callback: () => {
+        void this.openHomepageTab({ focus: true });
+      },
+    });
+    this.addCommand({
+      id: "toggle-homepage-tab",
+      name: "Toggle homepage tab",
+      callback: () => {
+        void this.toggleHomepageTab();
+      },
+    });
     this.registerDomEvent(window, "resize", () => this.refreshOpenFrozenViews());
     this.configureBaseViewSwitcher();
+    if (this.settings.homepage.enabled && this.settings.homepage.openOnStartup) {
+      this.app.workspace.onLayoutReady(() => {
+        void this.openHomepageTab({ focus: false });
+      });
+    }
   }
 
   onunload() {
@@ -428,6 +480,10 @@ export default class ObsidianHotfixesPlugin extends Plugin {
         ...DEFAULT_SETTINGS.calloutEditGuard,
         ...(loaded?.calloutEditGuard ?? {}),
       },
+      homepage: {
+        ...DEFAULT_SETTINGS.homepage,
+        ...(loaded?.homepage ?? {}),
+      },
     };
   }
 
@@ -435,7 +491,97 @@ export default class ObsidianHotfixesPlugin extends Plugin {
     await this.saveData(this.settings);
     this.applyStyles();
     this.refreshOpenFrozenViews();
+    this.refreshOpenHomepageViews();
     this.configureBaseViewSwitcher();
+  }
+
+  async updateHomepageSettings(updates: Partial<HomepageTabSettings>) {
+    this.settings.homepage = {
+      ...this.settings.homepage,
+      ...updates,
+    };
+    await this.saveSettings();
+  }
+
+  private getHomepageNotePath(): string {
+    return this.settings.homepage.notePath.trim();
+  }
+
+  private getHomepageTitle(): string {
+    return this.settings.homepage.title.trim() || "Homepage";
+  }
+
+  private getHomepageLeaves(): WorkspaceLeaf[] {
+    return this.app.workspace.getLeavesOfType(HOMEPAGE_VIEW_TYPE);
+  }
+
+  private getHomepageLeaf(): WorkspaceLeaf | null {
+    return this.getHomepageLeaves()[0] ?? null;
+  }
+
+  private async getOrCreateHomepageLeaf(): Promise<WorkspaceLeaf> {
+    const existing = this.getHomepageLeaf();
+    if (existing) {
+      return existing;
+    }
+
+    return this.app.workspace.getLeaf("split", "vertical");
+  }
+
+  private async openHomepageTab(options: { focus?: boolean } = {}) {
+    if (!this.settings.homepage.enabled) {
+      new Notice("Enable the homepage tab in plugin settings first.");
+      return;
+    }
+
+    const notePath = this.getHomepageNotePath();
+    if (!notePath) {
+      new Notice("Set a homepage note path in plugin settings.");
+      return;
+    }
+
+    const homepageFile = this.app.vault.getFileByPath(notePath);
+    if (!homepageFile) {
+      new Notice(`Homepage note not found: ${notePath}`);
+      return;
+    }
+
+    const leaf = await this.getOrCreateHomepageLeaf();
+    await leaf.setViewState({
+      type: HOMEPAGE_VIEW_TYPE,
+      state: {
+        filePath: homepageFile.path,
+        title: this.getHomepageTitle(),
+      },
+      active: options.focus !== false,
+    });
+    leaf.setPinned(true);
+
+    if (options.focus !== false) {
+      this.app.workspace.setActiveLeaf(leaf, { focus: true });
+    }
+  }
+
+  private async toggleHomepageTab() {
+    const leaf = this.getHomepageLeaf();
+    if (leaf) {
+      leaf.detach();
+      return;
+    }
+
+    await this.openHomepageTab({ focus: true });
+  }
+
+  private refreshOpenHomepageViews() {
+    const notePath = this.getHomepageNotePath();
+    const title = this.getHomepageTitle();
+
+    this.getHomepageLeaves().forEach(async (leaf) => {
+      const view = leaf.view as unknown as HomepageSidebarView | null;
+      if (view instanceof HomepageSidebarView) {
+        await view.setContentSource(notePath, title);
+      }
+    });
   }
 
   private applyStyles() {
@@ -1523,6 +1669,114 @@ export default class ObsidianHotfixesPlugin extends Plugin {
   }
 }
 
+class HomepageSidebarView extends ItemView {
+  private contentRoot: HTMLDivElement;
+  private filePath: string | null = null;
+  private title: string | null = null;
+  private renderId = 0;
+
+  constructor(
+    leaf: WorkspaceLeaf,
+    private plugin: ObsidianHotfixesPlugin
+  ) {
+    super(leaf);
+    this.contentRoot = this.contentEl.createDiv(HOMEPAGE_VIEW_CLASS);
+  }
+
+  getViewType(): string {
+    return HOMEPAGE_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return this.title?.trim() || this.plugin.settings.homepage.title;
+  }
+
+  getIcon(): string {
+    return "home";
+  }
+
+  async onOpen(): Promise<void> {
+    await this.render();
+  }
+
+  async setState(
+    state: unknown,
+    result: ViewStateResult
+  ): Promise<void> {
+    const homepageState = state as {
+      filePath?: string;
+      title?: string;
+    } | null;
+    result.history = false;
+
+    if (typeof homepageState?.filePath === "string") {
+      this.filePath = homepageState.filePath.trim();
+    }
+    if (typeof homepageState?.title === "string") {
+      this.title = homepageState.title.trim();
+    }
+
+    await this.render();
+  }
+
+  getState(): Record<string, unknown> {
+    return {
+      filePath: this.filePath ?? "",
+      title: this.title ?? this.plugin.settings.homepage.title,
+    };
+  }
+
+  async setContentSource(filePath: string, title: string): Promise<void> {
+    this.filePath = filePath.trim();
+    this.title = title.trim();
+    await this.render();
+  }
+
+  private async render() {
+    const renderId = ++this.renderId;
+    this.contentRoot.empty();
+
+    if (!this.filePath) {
+      this.renderEmpty("No homepage note is configured.");
+      return;
+    }
+
+    const file = this.plugin.app.vault.getFileByPath(this.filePath);
+    if (!(file instanceof TFile)) {
+      this.renderEmpty(`Homepage note not found: ${this.filePath}`);
+      return;
+    }
+
+    const source = await this.plugin.app.vault.cachedRead(file);
+    if (renderId !== this.renderId) {
+      return;
+    }
+
+    const withoutFrontmatter = source.replace(
+      /^---\s*[\r\n]+[\s\S]*?[\r\n]+---\s*[\r\n]*/m,
+      ""
+    );
+    const contentEl = this.contentRoot.createDiv({
+      cls: HOMEPAGE_VIEW_CONTENT_CLASS,
+    });
+
+    await MarkdownRenderer.render(
+      this.plugin.app,
+      withoutFrontmatter,
+      contentEl,
+      file.path,
+      this.plugin
+    );
+  }
+
+  private renderEmpty(message: string) {
+    this.contentRoot.createDiv({
+      cls: HOMEPAGE_VIEW_EMPTY_CLASS,
+      text: message,
+    });
+  }
+}
+
 class FrozenTableBasesView extends BasesView implements HoverParent {
   hoverPopover: HoverPopover | null = null;
   private readonly root: HTMLDivElement;
@@ -2591,6 +2845,10 @@ class HotfixesSettingTab extends PluginSettingTab {
   private zIndexInput: TextComponent | null = null;
   private baseFileToggle: ToggleComponent | null = null;
   private embeddedBaseToggle: ToggleComponent | null = null;
+  private homepageEnabledToggle: ToggleComponent | null = null;
+  private homepageFilePathInput: TextComponent | null = null;
+  private homepageTitleInput: TextComponent | null = null;
+  private homepageOpenOnStartupToggle: ToggleComponent | null = null;
 
   constructor(app: App, plugin: ObsidianHotfixesPlugin) {
     super(app, plugin);
@@ -2607,6 +2865,18 @@ class HotfixesSettingTab extends PluginSettingTab {
   private setBaseViewSwitcherSectionEnabled(enabled: boolean) {
     if (this.baseFileToggle) this.baseFileToggle.setDisabled(!enabled);
     if (this.embeddedBaseToggle) this.embeddedBaseToggle.setDisabled(!enabled);
+  }
+
+  private setHomepageSectionEnabled(enabled: boolean) {
+    if (this.homepageFilePathInput) {
+      this.homepageFilePathInput.setDisabled(!enabled);
+    }
+    if (this.homepageTitleInput) {
+      this.homepageTitleInput.setDisabled(!enabled);
+    }
+    if (this.homepageOpenOnStartupToggle) {
+      this.homepageOpenOnStartupToggle.setDisabled(!enabled);
+    }
   }
 
   display() {
@@ -2770,6 +3040,73 @@ class HotfixesSettingTab extends PluginSettingTab {
       });
 
     this.setBaseViewSwitcherSectionEnabled(switcherState.enabled);
+
+    const homepageDetails = containerEl.createEl("details", {
+      cls: "obsidian-hotfixes-setting-section",
+    });
+    homepageDetails.createEl("summary", {
+      text: "Homepage: Sidebar tab",
+    });
+    const homepageSection = homepageDetails.createEl("div", {
+      cls: "obsidian-hotfixes-setting-section-content",
+    });
+    const homepageState = this.plugin.settings.homepage;
+
+    new Setting(homepageSection)
+      .setName("Enable homepage tab")
+      .setDesc(
+        "Create a pinned sidebar view that renders one note as a clean dashboard."
+      )
+      .addToggle((toggle) => {
+        this.homepageEnabledToggle = toggle;
+        toggle.setValue(homepageState.enabled);
+        toggle.onChange(async (value) => {
+          await this.plugin.updateHomepageSettings({ enabled: value });
+          this.setHomepageSectionEnabled(value);
+        });
+      });
+
+    new Setting(homepageSection)
+      .setName("Homepage note path")
+      .setDesc(
+        "Path to the markdown note used in the sidebar (for example Notes/Homepage.md)."
+      )
+      .addText((text) => {
+        this.homepageFilePathInput = text;
+        text.setValue(homepageState.notePath);
+        text.setDisabled(!homepageState.enabled);
+        text.setPlaceholder("Notes/Homepage.md");
+        text.onChange(async (value) => {
+          await this.plugin.updateHomepageSettings({ notePath: value.trim() });
+        });
+      });
+
+    new Setting(homepageSection)
+      .setName("Tab title")
+      .setDesc("Label shown on the sidebar tab.")
+      .addText((text) => {
+        this.homepageTitleInput = text;
+        text.setValue(homepageState.title);
+        text.setDisabled(!homepageState.enabled);
+        text.setPlaceholder("Homepage");
+        text.onChange(async (value) => {
+          await this.plugin.updateHomepageSettings({ title: value.trim() });
+        });
+      });
+
+    new Setting(homepageSection)
+      .setName("Open automatically on startup")
+      .setDesc("Open the homepage tab when Obsidian loads.")
+      .addToggle((toggle) => {
+        this.homepageOpenOnStartupToggle = toggle;
+        toggle.setValue(homepageState.openOnStartup);
+        toggle.setDisabled(!homepageState.enabled);
+        toggle.onChange(async (value) => {
+          await this.plugin.updateHomepageSettings({ openOnStartup: value });
+        });
+      });
+
+    this.setHomepageSectionEnabled(homepageState.enabled);
 
     const calloutDetails = containerEl.createEl("details", {
       cls: "obsidian-hotfixes-setting-section",

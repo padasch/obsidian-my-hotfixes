@@ -12,6 +12,9 @@ Personal utility plugin for small Obsidian quality-of-life fixes.
 - **Hotfix section: Callout edit guard**
   - In Live Preview, prevents accidental callout edit/source activation when clicking in a rendered callout body.
   - Keeps links, checkboxes, task controls, callout folding, and the callout edit button interactive.
+- **Hotfix section: Homepage sidebar tab**
+  - Adds a pinned custom view for a configurable markdown source note.
+  - Useful for tasks/notes dashboards built with callouts, `tasks` queries, and buttons.
 
 ## Settings
 
@@ -29,6 +32,9 @@ All settings are in the plugin settings panel and are arranged as foldable secti
 1. Enable the hotfix sections you want in plugin settings.
 2. For sticky Bases, open any Base with `table` data and switch to **Frozen Table**.
 3. For callouts, use Live Preview normally. Body clicks stay in preview; use Obsidian's callout edit button when you want to edit the callout block.
+4. For the homepage tab, set a note path in plugin settings and add the command to your hotkeys:
+   - `Obsidian Hotfixes: Open homepage tab`
+   - `Obsidian Hotfixes: Toggle homepage tab`
 
 ## BRAT setup
 

@@ -62,3 +62,23 @@
   outline: 2px solid var(--interactive-accent);
   outline-offset: 2px;
 }
+
+.obsidian-hotfixes-homepage-root {
+  height: 100%;
+  overflow: auto;
+  padding: 0.75rem 0.8rem;
+  box-sizing: border-box;
+}
+
+.obsidian-hotfixes-homepage-content .markdown-preview-view {
+  padding: 0;
+}
+
+.obsidian-hotfixes-homepage-content {
+  min-height: 100%;
+}
+
+.obsidian-hotfixes-homepage-empty {
+  color: var(--text-muted);
+  padding: 1rem;
+}

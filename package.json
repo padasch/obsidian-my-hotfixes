@@ -1,6 +1,6 @@
 {
   "name": "obsidian-my-hotfixes",
-  "version": "1.0.27",
+  "version": "1.0.28",
   "description": "A lightweight Obsidian plugin for personal hotfixes.",
   "main": "main.js",
   "author": "obsidian-hotfixes",
